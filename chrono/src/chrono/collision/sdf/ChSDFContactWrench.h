@@ -17,7 +17,9 @@
 #include <vector>
 
 #include "chrono/collision/ChCollisionShapeSDF.h"
+#include "chrono/collision/sdf/ChSDFContactRegion.h"
 #include "chrono/core/ChFrame.h"
+#include "chrono/core/ChFrameMoving.h"
 #include "chrono/core/ChVector3.h"
 
 namespace chrono {
@@ -100,6 +102,77 @@ struct ChApi ChSDFContactWrenchResult {
     bool HasActiveContact() const { return active_samples > 0; }
 };
 
+/// One sample contribution in the distributed dual-SDF region-to-wrench aggregation.
+struct ChApi ChSDFBrickPairWrenchSample {
+    ChSDFBrickPairRegionSample region_sample;
+
+    bool active = false;
+
+    double quadrature_area = 0;
+    double signed_gap = 0;
+    double penetration = 0;
+    double normal_speed = 0;
+    double pressure = 0;
+
+    ChVector3d point_patch = VNULL;
+    ChVector3d force_world = VNULL;
+    ChVector3d force_shape_a = VNULL;
+    ChVector3d torque_shape_a = VNULL;
+    ChVector3d force_shape_b = VNULL;
+    ChVector3d torque_shape_b = VNULL;
+};
+
+/// Aggregated distributed contact result for one dual-SDF connected region.
+struct ChApi ChSDFBrickPairWrenchResult {
+    ChSDFBrickPairRegion region;
+
+    /// Net wrench acting on shape A, reduced to the origin of shape A and expressed in the local frame of shape A.
+    ChWrenchd wrench_shape_a = {VNULL, VNULL};
+    /// Net wrench acting on shape B, reduced to the origin of shape B and expressed in the local frame of shape B.
+    ChWrenchd wrench_shape_b = {VNULL, VNULL};
+
+    /// Same physical wrenches expressed in the absolute frame and reduced to the corresponding shape origins.
+    ChWrenchd wrench_world_a = {VNULL, VNULL};
+    ChWrenchd wrench_world_b = {VNULL, VNULL};
+
+    std::size_t total_samples = 0;
+    std::size_t active_samples = 0;
+
+    double patch_area = 0;
+    double active_area = 0;
+    double integrated_pressure = 0;
+    double mean_pressure = 0;
+    double max_penetration = 0;
+    double max_pressure = 0;
+
+    ChVector3d pressure_center_world = VNULL;
+
+    std::vector<ChSDFBrickPairWrenchSample> samples;
+
+    bool HasActiveContact() const { return active_samples > 0; }
+};
+
+/// Aggregated distributed contact result across all connected regions of one SDF-shape pair.
+struct ChApi ChSDFShapePairContactResult {
+    ChWrenchd wrench_shape_a = {VNULL, VNULL};
+    ChWrenchd wrench_shape_b = {VNULL, VNULL};
+    ChWrenchd wrench_world_a = {VNULL, VNULL};
+    ChWrenchd wrench_world_b = {VNULL, VNULL};
+
+    std::size_t total_regions = 0;
+    std::size_t active_regions = 0;
+
+    double active_area = 0;
+    double integrated_pressure = 0;
+    double mean_pressure = 0;
+    double max_penetration = 0;
+    double max_pressure = 0;
+
+    std::vector<ChSDFBrickPairWrenchResult> regions;
+
+    bool HasActiveContact() const { return active_regions > 0; }
+};
+
 /// Distributed contact evaluator that turns a sampled SDF patch into a net wrench.
 class ChApi ChSDFContactWrenchEvaluator {
   public:
@@ -115,6 +188,19 @@ class ChApi ChSDFContactWrenchEvaluator {
                                                        const ChSDFContactPatchSampler::Settings& patch_settings,
                                                        const ChSDFPatchKinematics& relative_kinematics,
                                                        const ChSDFNormalPressureSettings& pressure_settings);
+
+    /// Evaluate one parameterized dual-SDF connected region against the same normal-only pressure law.
+    static ChSDFBrickPairWrenchResult EvaluateBrickPairRegion(const ChSDFBrickPairRegion& region,
+                                                              const ChFrameMoving<>& shape_a_frame_abs,
+                                                              const ChFrameMoving<>& shape_b_frame_abs,
+                                                              const ChSDFNormalPressureSettings& pressure_settings);
+
+    /// Evaluate multiple parameterized dual-SDF connected regions and aggregate the resulting wrenches.
+    static ChSDFShapePairContactResult EvaluateBrickPairRegions(
+        const std::vector<ChSDFBrickPairRegion>& regions,
+        const ChFrameMoving<>& shape_a_frame_abs,
+        const ChFrameMoving<>& shape_b_frame_abs,
+        const ChSDFNormalPressureSettings& pressure_settings);
 };
 
 /// @} chrono_collision

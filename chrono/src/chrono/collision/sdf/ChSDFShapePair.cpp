@@ -36,6 +36,22 @@ ChFrame<> ChSDFShapePair::GetShapeBFrameAbs() const {
     return ChFrame<>(m_body_b->GetFrameRefToAbs().TransformLocalToParent(ChFrameMoving<>(m_shape_b_frame)).GetCoordsys());
 }
 
+ChFrameMoving<> ChSDFShapePair::GetShapeAFrameAbsMoving() const {
+    if (!m_body_a) {
+        return ChFrameMoving<>(m_shape_a_frame);
+    }
+
+    return m_body_a->GetFrameRefToAbs().TransformLocalToParent(ChFrameMoving<>(m_shape_a_frame));
+}
+
+ChFrameMoving<> ChSDFShapePair::GetShapeBFrameAbsMoving() const {
+    if (!m_body_b) {
+        return ChFrameMoving<>(m_shape_b_frame);
+    }
+
+    return m_body_b->GetFrameRefToAbs().TransformLocalToParent(ChFrameMoving<>(m_shape_b_frame));
+}
+
 std::vector<ChSDFBrickPairCandidate> ChSDFShapePair::FindBrickPairs(
     const ChSDFBrickPairBroadphase::Settings& settings) const {
     if (!IsReady()) {
@@ -68,6 +84,19 @@ std::vector<ChSDFBrickPairRegion> ChSDFShapePair::BuildContactRegions(
     const auto brick_pairs = FindBrickPairs(pair_settings);
     return ChSDFContactRegionBuilder::BuildBrickPairRegions(*m_shape_a, GetShapeAFrameAbs(), *m_shape_b,
                                                             GetShapeBFrameAbs(), brick_pairs, region_settings);
+}
+
+ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
+    const ChSDFBrickPairBroadphase::Settings& pair_settings,
+    const ChSDFContactRegionBuilder::Settings& region_settings,
+    const ChSDFNormalPressureSettings& pressure_settings) const {
+    if (!IsReady()) {
+        return {};
+    }
+
+    const auto regions = BuildContactRegions(pair_settings, region_settings);
+    return ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(regions, GetShapeAFrameAbsMoving(),
+                                                                 GetShapeBFrameAbsMoving(), pressure_settings);
 }
 
 }  // end namespace chrono

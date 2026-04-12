@@ -76,6 +76,7 @@ struct ChApi ChSDFBrickPairRegionSample {
     ChVector3i coord = ChVector3i(0, 0, 0);
 
     ChVector3d point_world = VNULL;
+    ChVector3d point_patch = VNULL;
     ChVector3d point_shape_a = VNULL;
     ChVector3d point_shape_b = VNULL;
 
@@ -101,7 +102,12 @@ struct ChApi ChSDFBrickPairRegionSample {
 struct ChApi ChSDFBrickPairRegion {
     std::size_t region_id = 0;
 
+    ChFrame<> contact_frame_world;
+    ChFrame<> contact_frame_shape_a;
+    ChFrame<> contact_frame_shape_b;
+
     ChAABB world_bounds;
+    ChAABB patch_bounds;
     ChAABB shape_a_bounds;
     ChAABB shape_b_bounds;
 
@@ -110,9 +116,13 @@ struct ChApi ChSDFBrickPairRegion {
     ChVector3d centroid_shape_b = VNULL;
     ChVector3d mean_normal_world = VNULL;
 
+    double sample_spacing = 0;
+
     std::vector<std::size_t> brick_a_indices;
     std::vector<std::size_t> brick_b_indices;
     std::vector<ChSDFBrickPairRegionSample> samples;
+
+    ChSDFContactPatchSampler::Settings suggested_patch_settings;
 
     bool HasSamples() const { return !samples.empty(); }
 };

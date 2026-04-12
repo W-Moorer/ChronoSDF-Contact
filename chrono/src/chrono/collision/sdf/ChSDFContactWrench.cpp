@@ -147,4 +147,139 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatchLocal(
     return EvaluatePatch(patch, patch_settings, relative_kinematics, pressure_settings);
 }
 
+ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
+    const ChSDFBrickPairRegion& region,
+    const ChFrameMoving<>& shape_a_frame_abs,
+    const ChFrameMoving<>& shape_b_frame_abs,
+    const ChSDFNormalPressureSettings& pressure_settings) {
+    ChSDFBrickPairWrenchResult result;
+    result.region = region;
+    result.total_samples = region.samples.size();
+    result.patch_area = 4.0 * region.suggested_patch_settings.half_length_u * region.suggested_patch_settings.half_length_v;
+
+    if (region.samples.empty()) {
+        return result;
+    }
+
+    const double du = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_u,
+                                                                                   region.suggested_patch_settings.half_length_u);
+    const double dv = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_v,
+                                                                                   region.suggested_patch_settings.half_length_v);
+    const double quadrature_area = du * dv;
+
+    double pressure_weight_sum = 0;
+    ChVector3d pressure_center_sum = VNULL;
+
+    result.samples.reserve(region.samples.size());
+
+    for (const auto& region_sample : region.samples) {
+        ChSDFBrickPairWrenchSample sample;
+        sample.region_sample = region_sample;
+        sample.point_patch = region_sample.point_patch;
+        sample.quadrature_area = quadrature_area;
+
+        sample.signed_gap = region_sample.combined_gap - pressure_settings.distance_offset;
+        sample.penetration = std::max(-sample.signed_gap, 0.0);
+
+        const ChVector3d speed_world_a = shape_a_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_a);
+        const ChVector3d speed_world_b = shape_b_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_b);
+        const ChVector3d relative_speed_world = speed_world_b - speed_world_a;
+        sample.normal_speed = -Vdot(relative_speed_world, region_sample.contact_normal_world);
+
+        const double damping_speed =
+            pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
+        sample.pressure = pressure_settings.stiffness * sample.penetration +
+                          pressure_settings.damping * damping_speed + pressure_settings.adhesion_pressure;
+        sample.pressure = ClampPressure(sample.pressure, pressure_settings);
+
+        if (sample.pressure > 0) {
+            sample.active = true;
+
+            const ChVector3d force_world_b = region_sample.contact_normal_world * (sample.pressure * sample.quadrature_area);
+            const ChVector3d force_world_a = -force_world_b;
+
+            const ChVector3d torque_world_a =
+                Vcross(region_sample.point_world - shape_a_frame_abs.GetPos(), force_world_a);
+            const ChVector3d torque_world_b =
+                Vcross(region_sample.point_world - shape_b_frame_abs.GetPos(), force_world_b);
+
+            sample.force_world = force_world_b;
+            sample.force_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(force_world_a);
+            sample.torque_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(torque_world_a);
+            sample.force_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(force_world_b);
+            sample.torque_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(torque_world_b);
+
+            result.wrench_world_a.force += force_world_a;
+            result.wrench_world_a.torque += torque_world_a;
+            result.wrench_world_b.force += force_world_b;
+            result.wrench_world_b.torque += torque_world_b;
+            result.wrench_shape_a.force += sample.force_shape_a;
+            result.wrench_shape_a.torque += sample.torque_shape_a;
+            result.wrench_shape_b.force += sample.force_shape_b;
+            result.wrench_shape_b.torque += sample.torque_shape_b;
+
+            result.active_samples++;
+            result.active_area += sample.quadrature_area;
+            result.integrated_pressure += sample.pressure * sample.quadrature_area;
+            result.max_penetration = std::max(result.max_penetration, sample.penetration);
+            result.max_pressure = std::max(result.max_pressure, sample.pressure);
+
+            const double sample_weight = sample.pressure * sample.quadrature_area;
+            pressure_weight_sum += sample_weight;
+            pressure_center_sum += region_sample.point_world * sample_weight;
+        }
+
+        result.samples.push_back(sample);
+    }
+
+    if (result.active_area > 0) {
+        result.mean_pressure = result.integrated_pressure / result.active_area;
+    }
+
+    if (pressure_weight_sum > 0) {
+        result.pressure_center_world = pressure_center_sum / pressure_weight_sum;
+    }
+
+    return result;
+}
+
+ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(
+    const std::vector<ChSDFBrickPairRegion>& regions,
+    const ChFrameMoving<>& shape_a_frame_abs,
+    const ChFrameMoving<>& shape_b_frame_abs,
+    const ChSDFNormalPressureSettings& pressure_settings) {
+    ChSDFShapePairContactResult result;
+    result.total_regions = regions.size();
+    result.regions.reserve(regions.size());
+
+    for (const auto& region : regions) {
+        auto region_result = EvaluateBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, pressure_settings);
+
+        if (region_result.HasActiveContact()) {
+            result.active_regions++;
+            result.active_area += region_result.active_area;
+            result.integrated_pressure += region_result.integrated_pressure;
+            result.max_penetration = std::max(result.max_penetration, region_result.max_penetration);
+            result.max_pressure = std::max(result.max_pressure, region_result.max_pressure);
+        }
+
+        result.wrench_world_a.force += region_result.wrench_world_a.force;
+        result.wrench_world_a.torque += region_result.wrench_world_a.torque;
+        result.wrench_world_b.force += region_result.wrench_world_b.force;
+        result.wrench_world_b.torque += region_result.wrench_world_b.torque;
+        result.wrench_shape_a.force += region_result.wrench_shape_a.force;
+        result.wrench_shape_a.torque += region_result.wrench_shape_a.torque;
+        result.wrench_shape_b.force += region_result.wrench_shape_b.force;
+        result.wrench_shape_b.torque += region_result.wrench_shape_b.torque;
+
+        result.regions.push_back(std::move(region_result));
+    }
+
+    if (result.active_area > 0) {
+        result.mean_pressure = result.integrated_pressure / result.active_area;
+    }
+
+    return result;
+}
+
 }  // end namespace chrono

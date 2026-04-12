@@ -18,6 +18,9 @@
 #include <queue>
 #include <unordered_map>
 
+#include "chrono/core/ChFrameMoving.h"
+#include "chrono/core/ChMatrix33.h"
+
 namespace chrono {
 namespace {
 
@@ -225,6 +228,39 @@ ChVector3d SurfacePoint(const ChVector3d& query_point_shape,
     return query_point_shape - normal_shape * probe_shape.distance;
 }
 
+ChVector3d ProjectOntoTangent(const ChVector3d& direction, const ChVector3d& normal) {
+    return direction - normal * Vdot(direction, normal);
+}
+
+ChVector3d ChoosePatchTangent(const ChSDFBrickPairRegion& region, const ChVector3d& normal) {
+    ChVector3d best_tangent = VNULL;
+    double best_length = 0;
+
+    for (const auto& sample : region.samples) {
+        const ChVector3d tangent = ProjectOntoTangent(sample.point_world - region.centroid_world, normal);
+        const double length = tangent.Length();
+        if (length > best_length) {
+            best_tangent = tangent / length;
+            best_length = length;
+        }
+    }
+
+    if (best_length > 1.0e-12) {
+        return best_tangent;
+    }
+
+    const ChVector3d fallback_axes[] = {VECT_X, VECT_Y, VECT_Z};
+    for (const auto& axis : fallback_axes) {
+        const ChVector3d tangent = ProjectOntoTangent(axis, normal);
+        const double length = tangent.Length();
+        if (length > 1.0e-12) {
+            return tangent / length;
+        }
+    }
+
+    return VECT_X;
+}
+
 bool PairSamplesAreConnected(const ChSDFBrickPairRegionSample& a,
                              const ChSDFBrickPairRegionSample& b,
                              const ChSDFContactRegionBuilder::Settings& settings) {
@@ -246,7 +282,10 @@ bool PairSamplesAreConnected(const ChSDFBrickPairRegionSample& a,
     return true;
 }
 
-void FinalizeBrickPairRegion(ChSDFBrickPairRegion& region) {
+void FinalizeBrickPairRegion(ChSDFBrickPairRegion& region,
+                             const ChFrame<>& shape_a_frame_abs,
+                             const ChFrame<>& shape_b_frame_abs,
+                             double sample_spacing) {
     if (region.samples.empty()) {
         return;
     }
@@ -259,6 +298,54 @@ void FinalizeBrickPairRegion(ChSDFBrickPairRegion& region) {
     const double normal_length = region.mean_normal_world.Length();
     if (normal_length > 0) {
         region.mean_normal_world /= normal_length;
+    } else {
+        region.mean_normal_world = VECT_Z;
+    }
+
+    ChMatrix33<> rot;
+    rot.SetFromAxisZ(region.mean_normal_world, ChoosePatchTangent(region, region.mean_normal_world));
+    region.contact_frame_world = ChFrame<>(region.centroid_world, rot);
+    region.contact_frame_shape_a =
+        ChFrame<>(shape_a_frame_abs.TransformParentToLocal(ChFrameMoving<>(region.contact_frame_world)).GetCoordsys());
+    region.contact_frame_shape_b =
+        ChFrame<>(shape_b_frame_abs.TransformParentToLocal(ChFrameMoving<>(region.contact_frame_world)).GetCoordsys());
+
+    region.sample_spacing = sample_spacing;
+    region.suggested_patch_settings.max_abs_distance = sample_spacing;
+
+    for (auto& sample : region.samples) {
+        sample.point_patch = region.contact_frame_world.TransformPointParentToLocal(sample.point_world);
+        region.patch_bounds += sample.point_patch;
+    }
+
+    const double half_u =
+        std::max(std::abs(region.patch_bounds.min.x()), std::abs(region.patch_bounds.max.x())) + 0.5 * sample_spacing;
+    const double half_v =
+        std::max(std::abs(region.patch_bounds.min.y()), std::abs(region.patch_bounds.max.y())) + 0.5 * sample_spacing;
+
+    region.suggested_patch_settings.half_length_u = std::max(0.5 * sample_spacing, half_u);
+    region.suggested_patch_settings.half_length_v = std::max(0.5 * sample_spacing, half_v);
+    region.suggested_patch_settings.samples_u =
+        std::max<std::size_t>(3, static_cast<std::size_t>(
+                                     std::ceil(2.0 * region.suggested_patch_settings.half_length_u /
+                                               std::max(sample_spacing, 1.0e-12))) +
+                                      1);
+    region.suggested_patch_settings.samples_v =
+        std::max<std::size_t>(3, static_cast<std::size_t>(
+                                     std::ceil(2.0 * region.suggested_patch_settings.half_length_v /
+                                               std::max(sample_spacing, 1.0e-12))) +
+                                      1);
+    region.suggested_patch_settings.require_zero_crossing = false;
+    region.suggested_patch_settings.min_abs_normal_alignment = 0;
+    region.suggested_patch_settings.max_abs_distance =
+        std::max(region.suggested_patch_settings.max_abs_distance, 1.5 * sample_spacing);
+    region.suggested_patch_settings.samples_u = std::max<std::size_t>(region.suggested_patch_settings.samples_u, 2);
+    region.suggested_patch_settings.samples_v = std::max<std::size_t>(region.suggested_patch_settings.samples_v, 2);
+    if (region.suggested_patch_settings.samples_u % 2 == 0) {
+        region.suggested_patch_settings.samples_u += 1;
+    }
+    if (region.suggested_patch_settings.samples_v % 2 == 0) {
+        region.suggested_patch_settings.samples_v += 1;
     }
 }
 
@@ -658,6 +745,10 @@ std::vector<ChSDFBrickPairRegion> ChSDFContactRegionBuilder::BuildBrickPairRegio
         return regions;
     }
 
+    const ChNanoVDBGridInfo info_a = shape_a.GetGridInfo();
+    const ChNanoVDBGridInfo info_b = shape_b.GetGridInfo();
+    const double sample_spacing = ResolveSampleSpacing(info_a, info_b, settings);
+
     std::unordered_map<CoordKey, std::size_t, CoordKeyHasher> sample_lookup;
     sample_lookup.reserve(samples.size());
     for (std::size_t i = 0; i < samples.size(); ++i) {
@@ -742,7 +833,7 @@ std::vector<ChSDFBrickPairRegion> ChSDFContactRegionBuilder::BuildBrickPairRegio
         }
         std::sort(region.brick_b_indices.begin(), region.brick_b_indices.end());
 
-        FinalizeBrickPairRegion(region);
+        FinalizeBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, sample_spacing);
         regions.push_back(region);
     }
 

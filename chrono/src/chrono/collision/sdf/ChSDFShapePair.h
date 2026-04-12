@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "chrono/collision/sdf/ChSDFBrickPair.h"
+#include "chrono/collision/sdf/ChSDFContactWrench.h"
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
 #include "chrono/physics/ChBody.h"
 
@@ -55,6 +56,8 @@ class ChApi ChSDFShapePair {
     /// Return the absolute frames of the two SDF shapes.
     ChFrame<> GetShapeAFrameAbs() const;
     ChFrame<> GetShapeBFrameAbs() const;
+    ChFrameMoving<> GetShapeAFrameAbsMoving() const;
+    ChFrameMoving<> GetShapeBFrameAbsMoving() const;
 
     /// Enumerate coarse sparse brick pairs in the absolute frame.
     std::vector<ChSDFBrickPairCandidate> FindBrickPairs(const ChSDFBrickPairBroadphase::Settings& settings) const;
@@ -66,6 +69,11 @@ class ChApi ChSDFShapePair {
     /// Build connected dual-SDF contact regions from the retained brick pairs.
     std::vector<ChSDFBrickPairRegion> BuildContactRegions(const ChSDFBrickPairBroadphase::Settings& pair_settings,
                                                           const ChSDFContactRegionBuilder::Settings& region_settings) const;
+
+    /// Build connected dual-SDF contact regions and evaluate the resulting distributed contact wrenches.
+    ChSDFShapePairContactResult EvaluateContact(const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                                const ChSDFContactRegionBuilder::Settings& region_settings,
+                                                const ChSDFNormalPressureSettings& pressure_settings) const;
 
   private:
     ChBody* m_body_a = nullptr;
