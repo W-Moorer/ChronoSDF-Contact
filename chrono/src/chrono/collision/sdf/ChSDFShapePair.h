@@ -13,6 +13,7 @@
 #ifndef CH_SDF_SHAPE_PAIR_H
 #define CH_SDF_SHAPE_PAIR_H
 
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -31,6 +32,8 @@ namespace chrono {
 /// between two SDF shapes attached to two rigid bodies.
 class ChApi ChSDFShapePair {
   public:
+    static constexpr unsigned int kInvalidAccumulator = std::numeric_limits<unsigned int>::max();
+
     void SetBodyA(ChBody* body) { m_body_a = body; }
     void SetBodyB(ChBody* body) { m_body_b = body; }
 
@@ -52,6 +55,18 @@ class ChApi ChSDFShapePair {
 
     /// Return true if all required references are available and both SDF grids are loaded.
     bool IsReady() const;
+
+    /// Create one accumulator on each body if not already available.
+    void CreateAccumulators();
+
+    /// Clear the bound accumulators, if any.
+    void EmptyAccumulators();
+
+    void SetAccumulatorAIndex(unsigned int idx) { m_accumulator_a = idx; }
+    void SetAccumulatorBIndex(unsigned int idx) { m_accumulator_b = idx; }
+
+    unsigned int GetAccumulatorAIndex() const { return m_accumulator_a; }
+    unsigned int GetAccumulatorBIndex() const { return m_accumulator_b; }
 
     /// Return the absolute frames of the two SDF shapes.
     ChFrame<> GetShapeAFrameAbs() const;
@@ -75,6 +90,14 @@ class ChApi ChSDFShapePair {
                                                 const ChSDFContactRegionBuilder::Settings& region_settings,
                                                 const ChSDFNormalPressureSettings& pressure_settings) const;
 
+    /// Apply a previously evaluated shape-pair contact result to the currently bound body accumulators.
+    bool Apply(const ChSDFShapePairContactResult& result);
+
+    /// Evaluate and immediately apply the resulting distributed contact wrenches to the two bodies.
+    ChSDFShapePairContactResult EvaluateAndApply(const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                                 const ChSDFContactRegionBuilder::Settings& region_settings,
+                                                 const ChSDFNormalPressureSettings& pressure_settings);
+
   private:
     ChBody* m_body_a = nullptr;
     ChBody* m_body_b = nullptr;
@@ -84,6 +107,9 @@ class ChApi ChSDFShapePair {
 
     ChFrame<> m_shape_a_frame;
     ChFrame<> m_shape_b_frame;
+
+    unsigned int m_accumulator_a = kInvalidAccumulator;
+    unsigned int m_accumulator_b = kInvalidAccumulator;
 };
 
 /// @} chrono_collision

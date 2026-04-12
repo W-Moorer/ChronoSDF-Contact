@@ -20,6 +20,26 @@ bool ChSDFShapePair::IsReady() const {
     return m_body_a && m_body_b && m_shape_a && m_shape_b && m_shape_a->IsLoaded() && m_shape_b->IsLoaded();
 }
 
+void ChSDFShapePair::CreateAccumulators() {
+    if (m_body_a && m_accumulator_a == kInvalidAccumulator) {
+        m_accumulator_a = m_body_a->AddAccumulator();
+    }
+
+    if (m_body_b && m_accumulator_b == kInvalidAccumulator) {
+        m_accumulator_b = m_body_b->AddAccumulator();
+    }
+}
+
+void ChSDFShapePair::EmptyAccumulators() {
+    if (m_body_a && m_accumulator_a != kInvalidAccumulator) {
+        m_body_a->EmptyAccumulator(m_accumulator_a);
+    }
+
+    if (m_body_b && m_accumulator_b != kInvalidAccumulator) {
+        m_body_b->EmptyAccumulator(m_accumulator_b);
+    }
+}
+
 ChFrame<> ChSDFShapePair::GetShapeAFrameAbs() const {
     if (!m_body_a) {
         return m_shape_a_frame;
@@ -97,6 +117,33 @@ ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
     const auto regions = BuildContactRegions(pair_settings, region_settings);
     return ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(regions, GetShapeAFrameAbsMoving(),
                                                                  GetShapeBFrameAbsMoving(), pressure_settings);
+}
+
+bool ChSDFShapePair::Apply(const ChSDFShapePairContactResult& result) {
+    if (!result.valid || !IsReady()) {
+        return false;
+    }
+
+    if (m_accumulator_a == kInvalidAccumulator || m_accumulator_b == kInvalidAccumulator) {
+        return false;
+    }
+
+    m_body_a->AccumulateForce(m_accumulator_a, result.wrench_world_a.force, result.shape_a_frame_abs.GetPos(), false);
+    m_body_a->AccumulateTorque(m_accumulator_a, result.wrench_world_a.torque, false);
+
+    m_body_b->AccumulateForce(m_accumulator_b, result.wrench_world_b.force, result.shape_b_frame_abs.GetPos(), false);
+    m_body_b->AccumulateTorque(m_accumulator_b, result.wrench_world_b.torque, false);
+
+    return true;
+}
+
+ChSDFShapePairContactResult ChSDFShapePair::EvaluateAndApply(
+    const ChSDFBrickPairBroadphase::Settings& pair_settings,
+    const ChSDFContactRegionBuilder::Settings& region_settings,
+    const ChSDFNormalPressureSettings& pressure_settings) {
+    auto result = EvaluateContact(pair_settings, region_settings, pressure_settings);
+    Apply(result);
+    return result;
 }
 
 }  // end namespace chrono

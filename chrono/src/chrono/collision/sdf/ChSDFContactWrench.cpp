@@ -249,6 +249,9 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
     const ChFrameMoving<>& shape_b_frame_abs,
     const ChSDFNormalPressureSettings& pressure_settings) {
     ChSDFShapePairContactResult result;
+    result.valid = true;
+    result.shape_a_frame_abs = shape_a_frame_abs;
+    result.shape_b_frame_abs = shape_b_frame_abs;
     result.total_regions = regions.size();
     result.regions.reserve(regions.size());
 

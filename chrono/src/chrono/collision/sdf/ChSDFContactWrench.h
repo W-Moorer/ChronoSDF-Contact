@@ -154,6 +154,11 @@ struct ChApi ChSDFBrickPairWrenchResult {
 
 /// Aggregated distributed contact result across all connected regions of one SDF-shape pair.
 struct ChApi ChSDFShapePairContactResult {
+    bool valid = false;
+
+    ChFrameMoving<> shape_a_frame_abs;
+    ChFrameMoving<> shape_b_frame_abs;
+
     ChWrenchd wrench_shape_a = {VNULL, VNULL};
     ChWrenchd wrench_shape_b = {VNULL, VNULL};
     ChWrenchd wrench_world_a = {VNULL, VNULL};
