@@ -691,10 +691,12 @@ set(Chrono_collision_SOURCES
     collision/ChCollisionShapeMeshTriangle.cpp
     collision/ChCollisionShapeTriangleMesh.cpp
     collision/sdf/ChNanoVDBLevelSet.cpp
+    collision/sdf/ChSDFBrickPair.cpp
     collision/sdf/ChSDFPatchCandidate.cpp
     collision/sdf/ChSDFContactPair.cpp
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
+    collision/sdf/ChSDFShapePair.cpp
     collision/sdf/ChSDFContactWrench.cpp
     )
 set(Chrono_collision_HEADERS
@@ -726,28 +728,34 @@ set(Chrono_collision_HEADERS
     collision/ChCollisionShapeMeshTriangle.h
     collision/ChCollisionShapeTriangleMesh.h
     collision/sdf/ChNanoVDBLevelSet.h
+    collision/sdf/ChSDFBrickPair.h
     collision/sdf/ChSDFPatchCandidate.h
     collision/sdf/ChSDFContactPair.h
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
+    collision/sdf/ChSDFShapePair.h
     collision/sdf/ChSDFContactWrench.h
     )
 source_group(collision FILES ${Chrono_collision_SOURCES} ${Chrono_collision_HEADERS})
 
 set(Chrono_collision_sdf_SOURCES
     collision/sdf/ChNanoVDBLevelSet.cpp
+    collision/sdf/ChSDFBrickPair.cpp
     collision/sdf/ChSDFPatchCandidate.cpp
     collision/sdf/ChSDFContactPair.cpp
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
+    collision/sdf/ChSDFShapePair.cpp
     collision/sdf/ChSDFContactWrench.cpp
     )
 set(Chrono_collision_sdf_HEADERS
     collision/sdf/ChNanoVDBLevelSet.h
+    collision/sdf/ChSDFBrickPair.h
     collision/sdf/ChSDFPatchCandidate.h
     collision/sdf/ChSDFContactPair.h
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
+    collision/sdf/ChSDFShapePair.h
     collision/sdf/ChSDFContactWrench.h
     )
 source_group("collision\\sdf" FILES ${Chrono_collision_sdf_SOURCES} ${Chrono_collision_sdf_HEADERS})
