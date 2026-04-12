@@ -1,7 +1,7 @@
 Project CHRONO
 ==============
 
-Local fork note: this workspace is hard-trimmed for a minimal Windows build of the core Chrono multibody dynamics framework. Optional modules, demos, tests, support tooling, and the SDF contact extension were removed from the repository.
+Local fork note: this workspace is hard-trimmed for a minimal Windows build of the core Chrono multibody dynamics framework. Optional modules, demos, tests, support tooling, and the SDF contact extension were removed from the repository. A new optional `CH_ENABLE_NANOVDB_SDF=ON` path is available for sparse signed-distance query and patch-sampling utilities inside the core library.
 
 [![pipeline status](https://gitlab.com/uwsbel/chrono/badges/main/pipeline.svg)](https://gitlab.com/uwsbel/chrono/commits/main)
 [![BSD License](http://www.projectchrono.org/assets/logos/chrono-bsd.svg)](https://projectchrono.org/license-chrono.txt)

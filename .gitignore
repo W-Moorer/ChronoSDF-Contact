@@ -30,6 +30,10 @@ CMakeUserPresets.json
 /chrono/**/CMakeCache.txt
 /chrono/**/cmake_install.cmake
 /chrono/**/Testing/
+/tools/**/build/
+/tools/**/CMakeFiles/
+/tools/**/CMakeCache.txt
+/tools/**/cmake_install.cmake
 
 ##---------------------------------------------------
 ## C++
@@ -45,6 +49,10 @@ CMakeUserPresets.json
 *.so
 *.dylib
 *.dll
+
+# Generated sparse distance fields
+*.vdb
+*.nvdb
 
 # Compiled Static libraries
 *.lai

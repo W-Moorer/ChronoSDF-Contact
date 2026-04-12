@@ -1,0 +1,44 @@
+\section{问题定义与几何表述}
+本文考虑名义刚体之间的局部顺应接触问题。目标是在一般多体动力学求解框架中，对任意复杂几何之间的近接触区域进行在线识别，并在此基础上构造分布式法向接触作用及其净接触力矩。为此，本节首先给出几何表示、记号约定以及局部压入量定义。
+
+\subsection{几何表示与记号约定}
+设两个刚体分别记为 $A$ 和 $B$。它们在各自局部坐标系中的符号距离场分别记为 $\phi_A^L(\xi)$ 和 $\phi_B^L(\eta)$。设两刚体位姿分别为
+\begin{equation}
+T_A=(R_A,t_A),\qquad T_B=(R_B,t_B).
+\end{equation}
+则对世界坐标中的一点 $x$，其在两个局部坐标系中的对应点分别为
+\begin{equation}
+\xi_A(x)=R_A^\top (x-t_A),\qquad \eta_B(x)=R_B^\top (x-t_B).
+\end{equation}
+相应地，世界坐标中的距离场可写为
+\begin{equation}
+\phi_A(x)=\phi_A^L\big(\xi_A(x)\big),\qquad \phi_B(x)=\phi_B^L\big(\eta_B(x)\big).
+\end{equation}
+若距离场在局部可微，则局部法向由距离场梯度归一化得到
+\begin{equation}
+n_A(x)=\frac{\nabla \phi_A(x)}{\|\nabla \phi_A(x)\|},\qquad
+n_B(x)=\frac{\nabla \phi_B(x)}{\|\nabla \phi_B(x)\|}.
+\end{equation}
+
+为了衡量 SDF 查询质量，定义梯度质量指标
+\begin{equation}
+q_g(x)=\left|\|\nabla \phi(x)\|-1\right|.
+\end{equation}
+理想 SDF 在窄带内满足 $\|\nabla \phi\|\approx 1$，因此 $q_g$ 可作为局部几何可信度指标。
+
+\subsection{局部压入量与压入速度}
+对位于刚体 $A$ 表面或近表面的点 $x$，定义其相对于刚体 $B$ 的局部压入量为
+\begin{equation}
+\delta_{A\rightarrow B}(x)=\max\bigl(0,-\phi_B(x)\bigr).
+\end{equation}
+同理，对刚体 $B$ 可定义
+\begin{equation}
+\delta_{B\rightarrow A}(y)=\max\bigl(0,-\phi_A(y)\bigr).
+\end{equation}
+该定义表示：当一个表面点进入对方的负距离区域时，即可认为发生了局部压入。与点级罚函数不同，这里的压入量不会立即收缩为一个点力，而是保留为空间分布量，用于构造接触斑和局部压力场。
+
+在相对运动下，局部压入速度定义为
+\begin{equation}
+\dot{\delta}(x)=-\nabla \phi_B(x)\cdot v_{rel}(x),
+\end{equation}
+其中 $v_{rel}(x)$ 为两刚体在点 $x$ 处的相对速度。

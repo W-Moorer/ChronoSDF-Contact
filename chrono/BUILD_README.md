@@ -54,6 +54,32 @@ cmake --install E:/workspace/ChronoSDF-Contact/chrono/build_mbs_clean `
       --prefix E:/workspace/ChronoSDF-Contact/chrono/install_mbs_clean
 ```
 
+## Optional NanoVDB SDF Utilities
+
+The trimmed core now includes optional NanoVDB-based sparse signed-distance utilities under `chrono/collision/sdf`.
+
+To enable them on Windows with `vcpkg`:
+
+```powershell
+C:\vcpkg\vcpkg.exe install openvdb[nanovdb]:x64-windows
+
+cmake -S E:/workspace/ChronoSDF-Contact/chrono `
+      -B E:/workspace/ChronoSDF-Contact/chrono/build_mbs_nanovdb `
+      -G "Visual Studio 17 2022" `
+      -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+      -DVCPKG_TARGET_TRIPLET=x64-windows `
+      -DCH_ENABLE_NANOVDB_SDF=ON
+```
+
+Then build:
+
+```powershell
+cmake --build E:/workspace/ChronoSDF-Contact/chrono/build_mbs_nanovdb `
+      --config Release `
+      --target Chrono_core
+```
+
 ## Scope
 
 This is now a hard-trimmed fork. `CHRONO_BUILD_MINIMAL_MBS=OFF` is no longer supported in this workspace.

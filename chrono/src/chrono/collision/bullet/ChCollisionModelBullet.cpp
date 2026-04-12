@@ -221,6 +221,11 @@ void ChCollisionModelBullet::Populate() {
                 injectTriangleMesh(shape_trimesh, frame);
                 break;
             }
+            case ChCollisionShape::Type::SDF: {
+                // Sparse SDF shapes are currently exposed through Chrono's query and
+                // patch-sampling utilities, not through Bullet point-contact generation.
+                break;
+            }
             case ChCollisionShape::Type::MESHTRIANGLE: {
                 auto shape_triangle = std::static_pointer_cast<ChCollisionShapeMeshTriangle>(shape);
                 injectTriangleProxy(shape_triangle);

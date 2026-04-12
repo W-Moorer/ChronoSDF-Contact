@@ -685,10 +685,17 @@ set(Chrono_collision_SOURCES
     collision/ChCollisionShapeRoundedCylinder.cpp
     collision/ChCollisionShapeSegment2D.cpp
     collision/ChCollisionShapeSegment.cpp
+    collision/ChCollisionShapeSDF.cpp
     collision/ChCollisionShapeSphere.cpp
     collision/ChCollisionShapeTriangle.cpp
     collision/ChCollisionShapeMeshTriangle.cpp
     collision/ChCollisionShapeTriangleMesh.cpp
+    collision/sdf/ChNanoVDBLevelSet.cpp
+    collision/sdf/ChSDFPatchCandidate.cpp
+    collision/sdf/ChSDFContactPair.cpp
+    collision/sdf/ChSDFContactPatch.cpp
+    collision/sdf/ChSDFContactRegion.cpp
+    collision/sdf/ChSDFContactWrench.cpp
     )
 set(Chrono_collision_HEADERS
     collision/ChCollisionInfo.h
@@ -713,12 +720,37 @@ set(Chrono_collision_HEADERS
     collision/ChCollisionShapeRoundedCylinder.h
     collision/ChCollisionShapeSegment2D.h
     collision/ChCollisionShapeSegment.h
+    collision/ChCollisionShapeSDF.h
     collision/ChCollisionShapeSphere.h
     collision/ChCollisionShapeTriangle.h
     collision/ChCollisionShapeMeshTriangle.h
     collision/ChCollisionShapeTriangleMesh.h
+    collision/sdf/ChNanoVDBLevelSet.h
+    collision/sdf/ChSDFPatchCandidate.h
+    collision/sdf/ChSDFContactPair.h
+    collision/sdf/ChSDFContactPatch.h
+    collision/sdf/ChSDFContactRegion.h
+    collision/sdf/ChSDFContactWrench.h
     )
 source_group(collision FILES ${Chrono_collision_SOURCES} ${Chrono_collision_HEADERS})
+
+set(Chrono_collision_sdf_SOURCES
+    collision/sdf/ChNanoVDBLevelSet.cpp
+    collision/sdf/ChSDFPatchCandidate.cpp
+    collision/sdf/ChSDFContactPair.cpp
+    collision/sdf/ChSDFContactPatch.cpp
+    collision/sdf/ChSDFContactRegion.cpp
+    collision/sdf/ChSDFContactWrench.cpp
+    )
+set(Chrono_collision_sdf_HEADERS
+    collision/sdf/ChNanoVDBLevelSet.h
+    collision/sdf/ChSDFPatchCandidate.h
+    collision/sdf/ChSDFContactPair.h
+    collision/sdf/ChSDFContactPatch.h
+    collision/sdf/ChSDFContactRegion.h
+    collision/sdf/ChSDFContactWrench.h
+    )
+source_group("collision\\sdf" FILES ${Chrono_collision_sdf_SOURCES} ${Chrono_collision_sdf_HEADERS})
 
 # Multicore collision group
 
@@ -1415,6 +1447,13 @@ target_include_directories(Chrono_core PUBLIC
 )
 
 target_link_libraries(Chrono_core PUBLIC Eigen3::Eigen)
+
+if(CH_ENABLE_NANOVDB_SDF)
+  target_link_libraries(Chrono_core PUBLIC OpenVDB::openvdb)
+  target_compile_definitions(Chrono_core PUBLIC $<$<COMPILE_LANGUAGE:CXX>:CHRONO_HAS_NANOVDB_SDF=1>)
+else()
+  target_compile_definitions(Chrono_core PUBLIC $<$<COMPILE_LANGUAGE:CXX>:CHRONO_HAS_NANOVDB_SDF=0>)
+endif()
 
 if(CHRONO_THRUST_FOUND)
   target_link_libraries(Chrono_core PRIVATE Thrust::Thrust)

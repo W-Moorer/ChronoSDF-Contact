@@ -1,0 +1,119 @@
+\section{基于 SDF 的接触斑与压力场接触模型}
+本文提出的 SDF 接触斑—压力场模型面向名义刚体之间的顺应接触建模，其核心目标是在不引入完整连续体局部变形求解的前提下，利用 SDF 提供的隐式几何信息在线构造接触斑，并在接触斑上定义局部压力密度，最终通过面积分获得净接触力与力矩。
+
+\subsection{接触斑定义}
+接触斑 $\mathcal{C}$ 是指两物体局部发生压入并能够承载分布压力的区域。由于 SDF 提供的是场信息而非显式接触面，本文采用“候选区域 + 一致性筛选”的方式定义接触斑。
+
+\subsubsection{候选接触区域}
+以刚体 $A$ 的离散表面样本作为载体，定义候选接触区域
+\begin{equation}
+\mathcal{C}_{cand}=\left\{x\in \partial A_h\mid \phi_B(x)\le \varepsilon_d\right\},
+\end{equation}
+其中 $\partial A_h$ 表示刚体 $A$ 表面的离散采样点集或面元集，$\varepsilon_d$ 为小的距离阈值。该阈值允许将极窄近接触带纳入候选区域，提高接触斑连通性与数值鲁棒性。
+
+\subsubsection{法向一致性筛选}
+设 $x$ 为候选点，$\Pi_B(x)$ 表示其在刚体 $B$ 上的对应近表面点。该点可通过沿 $-n_A(x)$ 的线搜索、局部投影或最小距离近似得到。要求两侧法向满足
+\begin{equation}
+n_A(x)\cdot\bigl(-n_B(\Pi_B(x))\bigr)\ge \eta_n,
+\end{equation}
+其中 $\eta_n$ 为法向一致性阈值。该条件用于排除薄特征、尖角和复杂凹槽中的不合理交叠区域。
+
+\subsubsection{双边距离一致性筛选}
+进一步要求
+\begin{equation}
+\left|\phi_B(x)+\phi_A\bigl(\Pi_B(x)\bigr)\right|\le \eta_\phi,
+\end{equation}
+其中 $\eta_\phi$ 为距离一致性阈值。满足该条件时，说明该区域附近存在近似对称的局部中间带，更适合解释为稳定接触区域。
+
+因此，最终接触斑定义为
+\begin{equation}
+\mathcal{C}=\left\{x\in \mathcal{C}_{cand}\;\middle|\;
+ n_A(x)\cdot\bigl(-n_B(\Pi_B(x))\bigr)\ge \eta_n,
+ \;\left|\phi_B(x)+\phi_A\bigl(\Pi_B(x)\bigr)\right|\le \eta_\phi
+\right\}.
+\end{equation}
+该定义不追求几何意义上的唯一接触面，而是构造一个数值上稳定、可用于积分的有效接触斑。
+
+\subsection{接触斑的离散化}
+在实现中，接触斑采用离散采样单元表示。设离散接触斑为
+\begin{equation}
+\mathcal{C}_h=\{(x_i,w_i)\}_{i=1}^{N},
+\end{equation}
+其中 $x_i$ 为第 $i$ 个采样单元中心，$w_i$ 为其面积权重，近似等于 $\Delta A_i$。
+
+本文优先采用“表面面元中心采样”：对刚体表面三角网格的每个面元取重心作为 $x_i$，面元面积作为 $w_i$。若面元重心满足接触斑条件，则该面元进入 $\mathcal{C}_h$。这种离散方式实现简单，且便于后续与传统点级接触模型进行公平比较。
+
+\subsection{局部压力场模型}
+在离散接触斑上，定义局部法向压力密度 $p(x)$：
+\begin{equation}
+p(x)=k_n(x)\,\delta(x)^{\alpha}+c_n(x)\,\max\bigl(0,\dot{\delta}(x)\bigr)\,\delta(x)^{\beta},
+\end{equation}
+其中：$\delta(x)$ 为局部压入量，$\dot{\delta}(x)$ 为局部压入速度，$\alpha\ge 1$ 为法向非线性指数，$\beta\ge 0$ 为阻尼项指数。该形式既覆盖线性弹簧阻尼模型，也可兼容类 Hertz 型非线性模型。与传统点罚函数不同，这里的 $p(x)$ 具有“单位面积接触力”的意义，因此总法向力由面积分给出。
+
+\subsubsection{局部法向刚度密度}
+为增强复杂几何下的鲁棒性，局部刚度密度不取全局常数，而定义为
+\begin{equation}
+k_n(x)=k_0\,f_\kappa\bigl(\kappa(x)\bigr)\,f_q\bigl(q_g(x)\bigr)\,f_h\bigl(h(x)\bigr),
+\end{equation}
+其中：$k_0$ 为全局基础刚度；$\kappa(x)$ 为局部曲率指标；$q_g(x)$ 为梯度质量指标；$h(x)$ 为局部几何分辨率尺度。
+
+一个易实现的选择是
+\begin{equation}
+f_\kappa(\kappa)=\frac{1}{1+a_\kappa \kappa},\qquad
+f_q(q)=e^{-a_q q},\qquad
+f_h(h)=\frac{1}{1+a_h h}.
+\end{equation}
+其含义是：高曲率区、低质量梯度区和低分辨率区的压力刚度适当降低，以减少接触法向噪声和力尖峰。
+
+\subsubsection{局部阻尼系数}
+局部阻尼系数定义为
+\begin{equation}
+c_n(x)=2\zeta\sqrt{k_n(x)m_{eff}(x)},
+\end{equation}
+其中 $\zeta$ 为阻尼比，$m_{eff}(x)$ 为沿局部法向方向的等效质量。若原型阶段难以稳定计算 $m_{eff}(x)$，可先采用常数阻尼或粗略质量近似。
+
+\subsection{净接触力与力矩}
+在离散接触斑上，第 $i$ 个采样单元的局部法向力为
+\begin{equation}
+f_{n,i}=p_i w_i n_i,
+\end{equation}
+其中 $p_i=p(x_i)$，$n_i$ 为局部有效法向，$w_i$ 为面积权重。
+
+若暂不考虑摩擦，则净接触力和净力矩为
+\begin{equation}
+F_n=\sum_{i=1}^{N} f_{n,i},
+\end{equation}
+\begin{equation}
+\tau_n=\sum_{i=1}^{N} (x_i-x_{ref})\times f_{n,i},
+\end{equation}
+其中 $x_{ref}$ 为刚体参考点，可取质心。
+
+若后续加入切向 traction，则可定义局部切向相对速度
+\begin{equation}
+v_{t,i}=v_{rel}(x_i)-\bigl(v_{rel}(x_i)\cdot n_i\bigr)n_i,
+\end{equation}
+并采用正则化库仑摩擦模型
+\begin{equation}
+t_i=-\mu_i p_i\,\psi\bigl(v_{t,i},\varepsilon_t\bigr),
+\end{equation}
+其中 $\psi$ 为有界光滑滑移函数，$\varepsilon_t$ 为正则化宽度。则总接触 wrench 为
+\begin{equation}
+F=\sum_{i=1}^{N}\bigl(f_{n,i}+t_i w_i\bigr),
+\end{equation}
+\begin{equation}
+\tau=\sum_{i=1}^{N}(x_i-x_{ref})\times\bigl(f_{n,i}+t_i w_i\bigr).
+\end{equation}
+
+为降低原型复杂度，建议第一阶段仅实现法向压力场与法向 wrench，待法向接触斑和力矩计算稳定后，再引入切向 traction。
+
+\subsection{数值稳定化策略}
+由于接触斑拓扑会随时间步变化，局部法向、压力中心和面积权重都可能跳变。为降低数值振荡，本文采用以下稳定化策略：
+\begin{enumerate}[label=(\arabic*)]
+    \item 接触激活阈值：仅当 $\delta(x)>\delta_{min}$，或 $\phi(x)<\varepsilon_d$ 且 $\dot{\delta}(x)>\dot{\delta}_{min}$ 时激活采样点；
+    \item 法向滤波：
+    \begin{equation}
+    n_i^{(k)}\leftarrow \text{normalize}\left((1-\lambda_n)n_i^{(k-1)}+\lambda_n \hat{n}_i^{(k)}\right);
+    \end{equation}
+    \item 压力截断：对异常大的局部压入量和压力密度施加上限；
+    \item 连通性筛选：在接触面元图上仅保留与主接触区域连通的采样子集，减少离散伪斑块。
+\end{enumerate}

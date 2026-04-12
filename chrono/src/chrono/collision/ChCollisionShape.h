@@ -49,6 +49,7 @@ class ChApi ChCollisionShape {
         PATH2D,       // 2D path (compound object)
         SEGMENT2D,    // line segment (part of a 2D path)
         ARC2D,        // circlular arc (part of a 2D path)
+        SDF,          // sparse signed distance field (for user-driven probing/patch sampling)
         UNKNOWN_SHAPE
     };
 

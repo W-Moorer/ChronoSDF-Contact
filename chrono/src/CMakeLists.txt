@@ -28,6 +28,7 @@ option(BUILD_BENCHMARKING "Build benchmark tests" OFF)
 option(CHRONO_ENABLE_MPI "Search for MPI support during configuration" ${CHRONO_ENABLE_MPI_DEFAULT})
 option(CHRONO_ENABLE_CUDA "Search for CUDA support during configuration" ${CHRONO_ENABLE_CUDA_DEFAULT})
 option(CHRONO_ENABLE_THRUST "Search for Thrust support during configuration" ${CHRONO_ENABLE_THRUST_DEFAULT})
+option(CH_ENABLE_NANOVDB_SDF "Enable NanoVDB/OpenVDB sparse signed-distance utilities in Chrono core" OFF)
 
 if(CHRONO_BUILD_MINIMAL_MBS)
   if(BUILD_DEMOS)
@@ -343,6 +344,15 @@ if(CHRONO_ENABLE_MPI)
 else()
   set(MPI_CXX_FOUND FALSE)
   message(STATUS "Skipping MPI search")
+endif()
+
+#-----------------------------------------------------------------------------
+# OpenVDB / NanoVDB support
+#-----------------------------------------------------------------------------
+
+if(CH_ENABLE_NANOVDB_SDF)
+  message(STATUS "Searching for OpenVDB for NanoVDB SDF support")
+  find_package(OpenVDB CONFIG REQUIRED)
 endif()
 
 #-----------------------------------------------------------------------------

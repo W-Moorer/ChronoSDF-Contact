@@ -1,0 +1,85 @@
+\section{多体动力学中的数值算法}
+本文方法面向一般多体动力学中的单时间步接触求解。对每个时间步，算法从候选接触对生成开始，随后在局部表面邻域上提取接触斑并计算压力场，最终将面积分得到的净接触 wrench 作为等效外作用施加到系统动力学方程中。
+
+\subsection{单时间步实现流程}
+\subsubsection*{步骤 1：候选接触对生成}
+利用现有碰撞检测流程中的 broad-phase 和 narrow-phase 模块，获得候选接触刚体对 $(A,B)$。该阶段不直接输出最终接触力，只需识别可能发生近接触的刚体对。
+
+\subsubsection*{步骤 2：局部接触区域采样}
+对候选对的局部邻域进行采样。本文优先对刚体 $A$ 的局部表面三角面元进行遍历，对每个面元重心 $x_i$ 查询 $\phi_B(x_i)$。若满足 $\phi_B(x_i)\le \varepsilon_d$，则进入候选区域，再通过法向一致性与双边距离一致性筛选形成离散接触斑 $\mathcal{C}_h$。
+
+\subsubsection*{步骤 3：局部场查询}
+对每个接触斑采样点 $x_i$，查询并计算：$\phi_B(x_i)$、$\nabla \phi_B(x_i)$、$\delta_i$、$\dot{\delta}_i$、$q_{g,i}$、局部曲率指标 $\kappa_i$ 以及面积权重 $w_i$。
+
+\subsubsection*{步骤 4：压力场计算}
+根据局部压力密度模型计算 $p_i$，并生成局部法向力 $f_i=p_i w_i n_i$。
+
+\subsubsection*{步骤 5：净 wrench 聚合}
+对所有局部法向力及其力矩求和，得到该接触对的净接触力 $F$ 和净接触力矩 $\tau$。
+
+\subsubsection*{步骤 6：等效作用施加}
+将净 wrench 作为等效外力和外力矩施加到刚体 $A$ 和 $B$ 上，并进入动力学积分器推进下一步。
+
+\subsection{伪代码}
+下面给出单时间步下的法向压力场接触伪代码。
+
+\begin{lstlisting}
+Algorithm 1  SDF-Patch-Pressure Contact for One Time Step
+Input:
+    Bodies {B_i}, states (q_k, qdot_k)
+    SDF evaluators phi_i(x), grad_phi_i(x)
+    thresholds eps_d, eta_n, eta_phi
+    pressure parameters k0, alpha, zeta
+Output:
+    Contact wrench for each candidate pair
+
+1: candidate_pairs <- BroadPhaseAndNarrowPhase()
+2: for each pair (A, B) in candidate_pairs do
+3:     C_h <- empty set
+4:     surface_samples <- SampleLocalSurface(A, B)
+5:     for each sample x_i in surface_samples do
+6:         d_i <- phi_B(x_i)
+7:         if d_i > eps_d then
+8:             continue
+9:         end if
+10:        nA_i <- NormalFromSurfaceOrSDF_A(x_i)
+11:        xB_i <- ProjectToSurfaceOfB(x_i, nA_i)
+12:        nB_i <- NormalFromSDF_B(xB_i)
+13:        if dot(nA_i, -nB_i) < eta_n then
+14:            continue
+15:        end if
+16:        if abs(phi_B(x_i) + phi_A(xB_i)) > eta_phi then
+17:            continue
+18:        end if
+19:        w_i <- AreaWeight(x_i)
+20:        Append (x_i, w_i, nA_i) to C_h
+21:     end for
+22:
+23:     F <- 0 ; Tau <- 0
+24:     for each contact sample (x_i, w_i, n_i) in C_h do
+25:         delta_i <- max(0, -phi_B(x_i))
+26:         if delta_i <= 0 then
+27:             continue
+28:         end if
+29:         grad_i <- grad_phi_B(x_i)
+30:         qg_i <- abs(norm(grad_i) - 1)
+31:         kappa_i <- EstimateCurvature(x_i)
+32:         kn_i <- k0 * f_kappa(kappa_i) * f_q(qg_i) * f_h(LocalScale(x_i))
+33:         vrel_i <- RelativeVelocityAtPoint(A, B, x_i)
+34:         delta_dot_i <- -dot(grad_i, vrel_i)
+35:         meff_i <- ApproxEffectiveMass(A, B, x_i, n_i)
+36:         cn_i <- 2 * zeta * sqrt(kn_i * meff_i)
+37:         p_i <- kn_i * delta_i^alpha + cn_i * max(0, delta_dot_i)
+38:         f_i <- p_i * w_i * n_i
+39:         F <- F + f_i
+40:         Tau <- Tau + cross(x_i - x_ref_A, f_i)
+41:     end for
+42:
+43:     ApplyWrench(A, +F, +Tau)
+44:     ApplyWrench(B, -F, -ActionReactionMoment(F, Tau))
+45: end for
+46: IntegrateSystemOneStep()
+\end{lstlisting}
+
+\subsection{实现要点}
+为控制算法复杂度并提高数值鲁棒性，本文建议在首版实现中优先采用法向压力场、表面面元中心采样以及简化的刚度/阻尼闭合关系。在此基础上，再逐步扩展到切向 traction、自适应采样和接触历史滤波。该渐进式策略有助于将模型误差、离散误差与时间积分误差分离评估。
