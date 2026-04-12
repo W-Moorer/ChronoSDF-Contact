@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "chrono/collision/sdf/ChSDFBrickPair.h"
+#include "chrono/collision/sdf/ChSDFContactRegion.h"
 #include "chrono/physics/ChBody.h"
 
 namespace chrono {
@@ -57,6 +58,14 @@ class ChApi ChSDFShapePair {
 
     /// Enumerate coarse sparse brick pairs in the absolute frame.
     std::vector<ChSDFBrickPairCandidate> FindBrickPairs(const ChSDFBrickPairBroadphase::Settings& settings) const;
+
+    /// Build dual-SDF region samples from the retained brick pairs.
+    std::vector<ChSDFBrickPairRegionSample> BuildRegionSamples(const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                                               const ChSDFContactRegionBuilder::Settings& region_settings) const;
+
+    /// Build connected dual-SDF contact regions from the retained brick pairs.
+    std::vector<ChSDFBrickPairRegion> BuildContactRegions(const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                                          const ChSDFContactRegionBuilder::Settings& region_settings) const;
 
   private:
     ChBody* m_body_a = nullptr;

@@ -46,4 +46,28 @@ std::vector<ChSDFBrickPairCandidate> ChSDFShapePair::FindBrickPairs(
                                                     settings);
 }
 
+std::vector<ChSDFBrickPairRegionSample> ChSDFShapePair::BuildRegionSamples(
+    const ChSDFBrickPairBroadphase::Settings& pair_settings,
+    const ChSDFContactRegionBuilder::Settings& region_settings) const {
+    if (!IsReady()) {
+        return {};
+    }
+
+    const auto brick_pairs = FindBrickPairs(pair_settings);
+    return ChSDFContactRegionBuilder::BuildBrickPairSamples(*m_shape_a, GetShapeAFrameAbs(), *m_shape_b,
+                                                            GetShapeBFrameAbs(), brick_pairs, region_settings);
+}
+
+std::vector<ChSDFBrickPairRegion> ChSDFShapePair::BuildContactRegions(
+    const ChSDFBrickPairBroadphase::Settings& pair_settings,
+    const ChSDFContactRegionBuilder::Settings& region_settings) const {
+    if (!IsReady()) {
+        return {};
+    }
+
+    const auto brick_pairs = FindBrickPairs(pair_settings);
+    return ChSDFContactRegionBuilder::BuildBrickPairRegions(*m_shape_a, GetShapeAFrameAbs(), *m_shape_b,
+                                                            GetShapeBFrameAbs(), brick_pairs, region_settings);
+}
+
 }  // end namespace chrono
