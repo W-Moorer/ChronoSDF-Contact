@@ -26,6 +26,7 @@ CMakeUserPresets.json
 # Nested CMake/build trees in this workspace
 /chrono/build*/
 /chrono/install*/
+/chrono/**/build*/
 /chrono/**/CMakeFiles/
 /chrono/**/CMakeCache.txt
 /chrono/**/cmake_install.cmake
@@ -44,6 +45,7 @@ CMakeUserPresets.json
 *.lo
 *.o
 *.obj
+!chrono/template_project/assets/*.obj
 
 # Compiled Dynamic libraries
 *.so

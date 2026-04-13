@@ -63,6 +63,7 @@ endif()
 set(MY_FILES my_example.cpp)
 
 add_executable(my_demo ${MY_FILES})
+target_compile_features(my_demo PRIVATE cxx_std_17)
 
 #--------------------------------------------------------------
 # Set properties for the executable target
@@ -73,6 +74,7 @@ add_executable(my_demo ${MY_FILES})
 # (if using a build version of Chrono), or in its install tree
 # (if using an installed version of Chrono).
 target_compile_definitions(my_demo PRIVATE "CHRONO_DATA_DIR=\"${CHRONO_DATA_DIR}\"") 
+target_compile_definitions(my_demo PRIVATE "TEMPLATE_PROJECT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\"")
 
 if(MSVC)
     set_target_properties(my_demo PROPERTIES MSVC_RUNTIME_LIBRARY ${CHRONO_MSVC_RUNTIME_LIBRARY})

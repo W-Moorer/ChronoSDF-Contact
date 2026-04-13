@@ -307,6 +307,14 @@ if(CHRONO_OPENMP_CXX_AVAILABLE AND @CH_ENABLE_OPENMP@ AND CHRONO_CXX_FOUND)
 endif()
 
 #-------------------------------------------------------------------------------
+# Check OpenVDB if Chrono core was built with NanoVDB/OpenVDB SDF support
+#-------------------------------------------------------------------------------
+
+if(@CH_ENABLE_NANOVDB_SDF@)
+  find_package(OpenVDB REQUIRED)
+endif()
+
+#-------------------------------------------------------------------------------
 # Enable CUDA if necessary
 #-------------------------------------------------------------------------------
 
@@ -441,10 +449,8 @@ endif()
 #-------------------------------------------------------------------------------
 
 list(PREPEND CHRONO_LIB_NAMES "Chrono_core")
-list(PREPEND CHRONO_LIB_NAMES "ChronoModels_robot")
 if (NOT CHRONO_STATIC)
   list(APPEND CHRONO_DLL_NAMES "Chrono_core.dll")
-  list(APPEND CHRONO_DLL_NAMES "ChronoModels_robot.dll")
 endif()
 
 #-------------------------------------------------------------------------------
