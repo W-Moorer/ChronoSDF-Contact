@@ -233,6 +233,23 @@ ChVector3d ProjectOntoTangent(const ChVector3d& direction, const ChVector3d& nor
 }
 
 ChVector3d ChoosePatchTangent(const ChSDFBrickPairRegion& region, const ChVector3d& normal) {
+    const ChVector3d preferred_axes[] = {VECT_X, VECT_Y, VECT_Z};
+    ChVector3d preferred_tangent = VNULL;
+    double preferred_length = 0;
+
+    for (const auto& axis : preferred_axes) {
+        const ChVector3d tangent = ProjectOntoTangent(axis, normal);
+        const double length = tangent.Length();
+        if (length > preferred_length) {
+            preferred_tangent = tangent / length;
+            preferred_length = length;
+        }
+    }
+
+    if (preferred_length > 1.0e-12) {
+        return preferred_tangent;
+    }
+
     ChVector3d best_tangent = VNULL;
     double best_length = 0;
 
@@ -247,15 +264,6 @@ ChVector3d ChoosePatchTangent(const ChSDFBrickPairRegion& region, const ChVector
 
     if (best_length > 1.0e-12) {
         return best_tangent;
-    }
-
-    const ChVector3d fallback_axes[] = {VECT_X, VECT_Y, VECT_Z};
-    for (const auto& axis : fallback_axes) {
-        const ChVector3d tangent = ProjectOntoTangent(axis, normal);
-        const double length = tangent.Length();
-        if (length > 1.0e-12) {
-            return tangent / length;
-        }
     }
 
     return VECT_X;

@@ -39,6 +39,35 @@ struct CoordKey3Hasher {
     }
 };
 
+struct CoordKey2 {
+    int u = 0;
+    int v = 0;
+
+    bool operator==(const CoordKey2& other) const { return u == other.u && v == other.v; }
+};
+
+struct CoordKey2Hasher {
+    std::size_t operator()(const CoordKey2& key) const {
+        std::size_t seed = 0;
+        seed ^= static_cast<std::size_t>(key.u) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        seed ^= static_cast<std::size_t>(key.v) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+
+struct SurfacePatchSample {
+    const ChSDFBrickPairRegionSample* sample = nullptr;
+    CoordKey2 key;
+};
+
+struct SurfacePatchSelection {
+    std::vector<SurfacePatchSample> samples;
+    int min_u = 0;
+    int max_u = -1;
+    int min_v = 0;
+    int max_v = -1;
+};
+
 double GridStep(std::size_t count, double half_length) {
     return (count > 1) ? (2.0 * half_length / static_cast<double>(count - 1)) : (2.0 * half_length);
 }
@@ -291,6 +320,118 @@ std::vector<double> EstimateRegionCurvatureProxies(const ChSDFBrickPairRegion& r
     return curvature;
 }
 
+SurfacePatchSelection SelectSurfacePatchSamples(const ChSDFBrickPairRegion& region, double du, double dv) {
+    SurfacePatchSelection selection;
+    if (region.samples.empty()) {
+        return selection;
+    }
+
+    const double safe_du = std::abs(du) > 1.0e-12 ? std::abs(du) : 1.0;
+    const double safe_dv = std::abs(dv) > 1.0e-12 ? std::abs(dv) : 1.0;
+
+    struct CandidateChoice {
+        std::size_t sample_index = 0;
+        double plane_distance = std::numeric_limits<double>::infinity();
+        double gap_score = std::numeric_limits<double>::infinity();
+    };
+
+    std::unordered_map<CoordKey2, CandidateChoice, CoordKey2Hasher> best_by_cell;
+    best_by_cell.reserve(region.samples.size());
+
+    for (std::size_t i = 0; i < region.samples.size(); ++i) {
+        const auto& sample = region.samples[i];
+        const CoordKey2 key{static_cast<int>(std::llround(sample.point_patch.x() / safe_du)),
+                            static_cast<int>(std::llround(sample.point_patch.y() / safe_dv))};
+        const double plane_distance = std::abs(sample.point_patch.z());
+        const double gap_score = std::abs(sample.combined_gap);
+
+        const auto it = best_by_cell.find(key);
+        if (it == best_by_cell.end() || plane_distance < it->second.plane_distance - 1.0e-12 ||
+            (std::abs(plane_distance - it->second.plane_distance) <= 1.0e-12 && gap_score < it->second.gap_score)) {
+            best_by_cell[key] = CandidateChoice{i, plane_distance, gap_score};
+        }
+    }
+
+    if (best_by_cell.empty()) {
+        return selection;
+    }
+
+    selection.min_u = std::numeric_limits<int>::max();
+    selection.max_u = std::numeric_limits<int>::min();
+    selection.min_v = std::numeric_limits<int>::max();
+    selection.max_v = std::numeric_limits<int>::min();
+    selection.samples.reserve(best_by_cell.size());
+
+    for (const auto& item : best_by_cell) {
+        selection.min_u = std::min(selection.min_u, item.first.u);
+        selection.max_u = std::max(selection.max_u, item.first.u);
+        selection.min_v = std::min(selection.min_v, item.first.v);
+        selection.max_v = std::max(selection.max_v, item.first.v);
+        selection.samples.push_back(SurfacePatchSample{&region.samples[item.second.sample_index], item.first});
+    }
+
+    std::stable_sort(selection.samples.begin(), selection.samples.end(),
+                     [](const SurfacePatchSample& a, const SurfacePatchSample& b) {
+                         if (a.key.v != b.key.v) {
+                             return a.key.v < b.key.v;
+                         }
+                         return a.key.u < b.key.u;
+                     });
+
+    return selection;
+}
+
+std::vector<double> EstimateSurfaceRegionCurvatureProxies(const SurfacePatchSelection& selection,
+                                                          double du,
+                                                          double dv) {
+    std::vector<double> curvature(selection.samples.size(), 0.0);
+    if (selection.samples.empty()) {
+        return curvature;
+    }
+
+    const double safe_du = std::abs(du) > 1.0e-12 ? std::abs(du) : 1.0;
+    const double safe_dv = std::abs(dv) > 1.0e-12 ? std::abs(dv) : 1.0;
+
+    std::unordered_map<CoordKey2, std::size_t, CoordKey2Hasher> lookup;
+    lookup.reserve(selection.samples.size());
+    for (std::size_t i = 0; i < selection.samples.size(); ++i) {
+        lookup.emplace(selection.samples[i].key, i);
+    }
+
+    const struct Neighbor2D {
+        int du;
+        int dv;
+        double distance;
+    } neighbors[] = {
+        {-1, 0, safe_du}, {1, 0, safe_du}, {0, -1, safe_dv}, {0, 1, safe_dv},
+    };
+
+    for (std::size_t i = 0; i < selection.samples.size(); ++i) {
+        const auto& sample = selection.samples[i];
+        double sum = 0;
+        int count = 0;
+
+        for (const auto& neighbor : neighbors) {
+            const CoordKey2 key{sample.key.u + neighbor.du, sample.key.v + neighbor.dv};
+            const auto it = lookup.find(key);
+            if (it == lookup.end() || neighbor.distance <= 1.0e-12) {
+                continue;
+            }
+
+            const ChVector3d delta_normal =
+                selection.samples[it->second].sample->contact_normal_world - sample.sample->contact_normal_world;
+            sum += delta_normal.Length() / neighbor.distance;
+            ++count;
+        }
+
+        if (count > 0) {
+            curvature[i] = sum / static_cast<double>(count);
+        }
+    }
+
+    return curvature;
+}
+
 }  // namespace
 
 ChSDFEffectiveMassProperties ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(ChBody* body) {
@@ -479,23 +620,34 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
                                                                                    region.suggested_patch_settings.half_length_u);
     const double dv = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_v,
                                                                                    region.suggested_patch_settings.half_length_v);
-    const double quadrature_area = du * dv;
+    const double quadrature_area = std::abs(du * dv);
     const double resolution_length = region.sample_spacing > 0 ? region.sample_spacing : 0.5 * (std::abs(du) + std::abs(dv));
-    const auto curvature_proxies = EstimateRegionCurvatureProxies(region);
+    const auto surface_selection = SelectSurfacePatchSamples(region, du, dv);
+    const auto curvature_proxies = EstimateSurfaceRegionCurvatureProxies(surface_selection, du, dv);
 
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
     double local_stiffness_area_sum = 0;
     double effective_mass_area_sum = 0;
 
-    result.samples.reserve(region.samples.size());
+    result.samples.reserve(surface_selection.samples.size());
 
-    for (std::size_t sample_index = 0; sample_index < region.samples.size(); ++sample_index) {
-        const auto& region_sample = region.samples[sample_index];
+    for (std::size_t sample_index = 0; sample_index < surface_selection.samples.size(); ++sample_index) {
+        const auto& surface_sample = surface_selection.samples[sample_index];
+        const auto& region_sample = *surface_sample.sample;
         ChSDFBrickPairWrenchSample sample;
         sample.region_sample = region_sample;
         sample.point_patch = region_sample.point_patch;
-        sample.quadrature_area = quadrature_area;
+        const std::size_t count_u = surface_selection.max_u >= surface_selection.min_u
+                                        ? static_cast<std::size_t>(surface_selection.max_u - surface_selection.min_u + 1)
+                                        : 1;
+        const std::size_t count_v = surface_selection.max_v >= surface_selection.min_v
+                                        ? static_cast<std::size_t>(surface_selection.max_v - surface_selection.min_v + 1)
+                                        : 1;
+        const std::size_t index_u = static_cast<std::size_t>(surface_sample.key.u - surface_selection.min_u);
+        const std::size_t index_v = static_cast<std::size_t>(surface_sample.key.v - surface_selection.min_v);
+        sample.quadrature_area =
+            quadrature_area * TrapezoidWeight(index_u, count_u) * TrapezoidWeight(index_v, count_v);
 
         sample.signed_gap = region_sample.combined_gap - pressure_settings.distance_offset;
         sample.penetration = std::max(-sample.signed_gap, 0.0);

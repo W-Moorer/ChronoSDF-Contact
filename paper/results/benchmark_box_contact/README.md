@@ -31,5 +31,6 @@ First-round observations:
 
 - `grid_penalty_5x5` already tracks the dense plane reference closely in both scenarios.
 - `single_point_penalty` stays exact for centered compression, but shows the expected large torque and pressure-center errors once the contact becomes eccentric.
-- The current `distributed_sdf` implementation substantially over-predicts both force and active area in the centered case, and still exhibits large torque / center errors in the eccentric case.
-- These CSVs therefore serve as a useful regression baseline and also expose the next model issue to fix: the current region-to-patch reduction is still too volumetric for flat-face compression.
+- After the latest benchmark-driven fixes, `distributed_sdf` no longer exhibits the earlier volumetric over-counting problem in the centered case.
+- The residual bias is now different: the current `distributed_sdf` implementation still underestimates active area and normal force for flat-face compression, and it remains less accurate than `grid_penalty_5x5` in the eccentric case.
+- These CSVs therefore remain a useful regression baseline for the next step: improving patch coverage near flat-face boundaries and reducing eccentric-contact torque errors.
