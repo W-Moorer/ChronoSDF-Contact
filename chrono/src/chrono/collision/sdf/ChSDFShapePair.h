@@ -34,6 +34,19 @@ class ChApi ChSDFShapePair {
   public:
     static constexpr unsigned int kInvalidAccumulator = std::numeric_limits<unsigned int>::max();
 
+    struct StabilizationSettings {
+        bool enable_region_history = true;
+        bool enable_normal_filter = true;
+        double normal_filter_weight = 0.35;
+        double max_match_distance = 0.10;
+        double min_match_normal_cosine = 0.5;
+        std::size_t max_missed_steps = 2;
+        double activation_area = 0;
+        double deactivation_area = 0;
+        double activation_penetration = 0;
+        double deactivation_penetration = 0;
+    };
+
     void SetBodyA(ChBody* body) { m_body_a = body; }
     void SetBodyB(ChBody* body) { m_body_b = body; }
 
@@ -52,6 +65,8 @@ class ChApi ChSDFShapePair {
 
     const ChFrame<>& GetShapeAFrame() const { return m_shape_a_frame; }
     const ChFrame<>& GetShapeBFrame() const { return m_shape_b_frame; }
+    StabilizationSettings& GetStabilizationSettings() { return m_stabilization_settings; }
+    const StabilizationSettings& GetStabilizationSettings() const { return m_stabilization_settings; }
 
     /// Return true if all required references are available and both SDF grids are loaded.
     bool IsReady() const;
@@ -88,7 +103,7 @@ class ChApi ChSDFShapePair {
     /// Build connected dual-SDF contact regions and evaluate the resulting distributed contact wrenches.
     ChSDFShapePairContactResult EvaluateContact(const ChSDFBrickPairBroadphase::Settings& pair_settings,
                                                 const ChSDFContactRegionBuilder::Settings& region_settings,
-                                                const ChSDFNormalPressureSettings& pressure_settings) const;
+                                                const ChSDFNormalPressureSettings& pressure_settings);
 
     /// Apply a previously evaluated shape-pair contact result to the currently bound body accumulators.
     bool Apply(const ChSDFShapePairContactResult& result);
@@ -98,7 +113,28 @@ class ChApi ChSDFShapePair {
                                                  const ChSDFContactRegionBuilder::Settings& region_settings,
                                                  const ChSDFNormalPressureSettings& pressure_settings);
 
+    /// Drop any stored region history state.
+    void ClearHistory();
+
   private:
+    struct RegionHistoryState {
+        std::size_t persistent_id = 0;
+        ChVector3d centroid_world = VNULL;
+        ChVector3d filtered_normal_world = VECT_Z;
+        double last_active_area = 0;
+        double last_max_penetration = 0;
+        std::size_t age = 0;
+        std::size_t missed_steps = 0;
+        bool active = false;
+    };
+
+    std::vector<ChSDFBrickPairRegion> StabilizeRegions(const std::vector<ChSDFBrickPairRegion>& regions,
+                                                       const ChFrame<>& shape_a_frame_abs,
+                                                       const ChFrame<>& shape_b_frame_abs);
+    void ApplyActivationHysteresis(ChSDFShapePairContactResult& result);
+    void RebuildAggregateResult(ChSDFShapePairContactResult& result) const;
+    void UpdateHistory(const ChSDFShapePairContactResult& result);
+
     ChBody* m_body_a = nullptr;
     ChBody* m_body_b = nullptr;
 
@@ -107,6 +143,10 @@ class ChApi ChSDFShapePair {
 
     ChFrame<> m_shape_a_frame;
     ChFrame<> m_shape_b_frame;
+
+    StabilizationSettings m_stabilization_settings;
+    std::vector<RegionHistoryState> m_region_history;
+    std::size_t m_next_persistent_region_id = 1;
 
     unsigned int m_accumulator_a = kInvalidAccumulator;
     unsigned int m_accumulator_b = kInvalidAccumulator;

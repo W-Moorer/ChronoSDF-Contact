@@ -114,6 +114,18 @@ int main(int argc, char* argv[]) {
     pair.SetShapeBFrame(ChFrame<>());
     pair.CreateAccumulators();
 
+    auto& stabilization = pair.GetStabilizationSettings();
+    stabilization.enable_region_history = true;
+    stabilization.enable_normal_filter = true;
+    stabilization.normal_filter_weight = 0.35;
+    stabilization.max_match_distance = 0.10;
+    stabilization.min_match_normal_cosine = 0.3;
+    stabilization.max_missed_steps = 3;
+    stabilization.activation_area = 1.0e-6;
+    stabilization.deactivation_area = 5.0e-7;
+    stabilization.activation_penetration = 1.0e-6;
+    stabilization.deactivation_penetration = 5.0e-7;
+
     ChSDFBrickPairBroadphase::Settings pair_settings;
     pair_settings.world_margin = 0.10;
     pair_settings.max_separation_distance = 0.10;
@@ -166,9 +178,12 @@ int main(int argc, char* argv[]) {
         min_height = std::min(min_height, moving_body->GetPos().y());
 
         if (static_cast<int>(std::round(sys.GetChTime() / step_size)) % 50 == 0) {
+            const std::size_t region_id = result.regions.empty() ? 0 : result.regions.front().region.persistent_id;
+            const std::size_t region_age = result.regions.empty() ? 0 : result.regions.front().region.history_age;
             std::cout << "t=" << sys.GetChTime() << "  x=" << moving_body->GetPos().x()
                       << "  y=" << moving_body->GetPos().y() << "  vx=" << moving_body->GetLinVel().x()
-                      << "  vy=" << moving_body->GetLinVel().y() << "  active_regions=" << result.active_regions
+                      << "  vy=" << moving_body->GetLinVel().y() << "  rid=" << region_id
+                      << "  age=" << region_age << "  active_regions=" << result.active_regions
                       << "  m_eff=" << result.mean_effective_mass << "  k_mean=" << result.mean_local_stiffness
                       << "  k_max=" << result.max_local_stiffness
                       << "  Fx=" << result.wrench_world_b.force.x() << "  Fy=" << result.wrench_world_b.force.y()

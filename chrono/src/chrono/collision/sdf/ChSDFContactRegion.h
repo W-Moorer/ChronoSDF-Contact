@@ -101,6 +101,10 @@ struct ChApi ChSDFBrickPairRegionSample {
 /// One connected region extracted from dual-SDF brick-pair samples.
 struct ChApi ChSDFBrickPairRegion {
     std::size_t region_id = 0;
+    std::size_t persistent_id = 0;
+    std::size_t history_age = 0;
+    bool matched_history = false;
+    bool active_history = false;
 
     ChFrame<> contact_frame_world;
     ChFrame<> contact_frame_shape_a;
@@ -181,6 +185,11 @@ class ChApi ChSDFContactRegionBuilder {
                                                                    const ChFrame<>& shape_b_frame_abs,
                                                                    const std::vector<ChSDFBrickPairCandidate>& brick_pairs,
                                                                    const Settings& settings);
+
+    /// Recompute frames, patch coordinates, and patch bounds after region normals or centroids were modified.
+    static void ReparameterizeBrickPairRegion(ChSDFBrickPairRegion& region,
+                                              const ChFrame<>& shape_a_frame_abs,
+                                              const ChFrame<>& shape_b_frame_abs);
 };
 
 /// @} chrono_collision

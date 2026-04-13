@@ -849,4 +849,34 @@ std::vector<ChSDFBrickPairRegion> ChSDFContactRegionBuilder::BuildBrickPairRegio
     return regions;
 }
 
+void ChSDFContactRegionBuilder::ReparameterizeBrickPairRegion(ChSDFBrickPairRegion& region,
+                                                              const ChFrame<>& shape_a_frame_abs,
+                                                              const ChFrame<>& shape_b_frame_abs) {
+    if (region.samples.empty()) {
+        return;
+    }
+
+    region.world_bounds = ChAABB();
+    region.patch_bounds = ChAABB();
+    region.shape_a_bounds = ChAABB();
+    region.shape_b_bounds = ChAABB();
+    region.centroid_world = VNULL;
+    region.centroid_shape_a = VNULL;
+    region.centroid_shape_b = VNULL;
+    region.mean_normal_world = VNULL;
+
+    for (const auto& sample : region.samples) {
+        region.world_bounds += sample.point_world;
+        region.shape_a_bounds += sample.surface_shape_a;
+        region.shape_b_bounds += sample.surface_shape_b;
+        region.centroid_world += sample.point_world;
+        region.centroid_shape_a += sample.surface_shape_a;
+        region.centroid_shape_b += sample.surface_shape_b;
+        region.mean_normal_world += sample.contact_normal_world;
+    }
+
+    const double sample_spacing = region.sample_spacing > 0 ? region.sample_spacing : 1.0e-3;
+    FinalizeBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, sample_spacing);
+}
+
 }  // end namespace chrono
