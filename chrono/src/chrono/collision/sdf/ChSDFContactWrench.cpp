@@ -13,9 +13,29 @@
 #include "chrono/collision/sdf/ChSDFContactWrench.h"
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 
 namespace chrono {
 namespace {
+
+struct CoordKey3 {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+
+    bool operator==(const CoordKey3& other) const { return x == other.x && y == other.y && z == other.z; }
+};
+
+struct CoordKey3Hasher {
+    std::size_t operator()(const CoordKey3& key) const {
+        std::size_t seed = 0;
+        seed ^= static_cast<std::size_t>(key.x) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        seed ^= static_cast<std::size_t>(key.y) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        seed ^= static_cast<std::size_t>(key.z) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
 
 double GridStep(std::size_t count, double half_length) {
     return (count > 1) ? (2.0 * half_length / static_cast<double>(count - 1)) : (2.0 * half_length);
@@ -39,6 +59,51 @@ double ClampPressure(double pressure, const ChSDFNormalPressureSettings& setting
     }
 
     return pressure;
+}
+
+double GradientQuality(const ChSDFProbeResult& probe) {
+    return probe.valid ? std::abs(probe.gradient_world.Length() - 1.0) : 0.0;
+}
+
+double ResolutionMetric(double resolution_length, const ChSDFNormalPressureSettings& settings) {
+    if (resolution_length <= 0 || settings.resolution_scale_gain <= 0) {
+        return 0.0;
+    }
+
+    if (settings.reference_resolution_length > 0) {
+        return std::max(resolution_length / settings.reference_resolution_length - 1.0, 0.0);
+    }
+
+    return resolution_length;
+}
+
+double LocalStiffnessScale(double gradient_quality,
+                           double curvature_proxy,
+                           double resolution_length,
+                           const ChSDFNormalPressureSettings& settings) {
+    double scale = 1.0;
+
+    if (settings.gradient_quality_gain > 0) {
+        scale *= std::exp(-settings.gradient_quality_gain * std::max(gradient_quality, 0.0));
+    }
+
+    if (settings.curvature_gain > 0) {
+        scale *= 1.0 / (1.0 + settings.curvature_gain * std::max(curvature_proxy, 0.0));
+    }
+
+    if (settings.resolution_scale_gain > 0) {
+        scale *= 1.0 / (1.0 + settings.resolution_scale_gain * ResolutionMetric(resolution_length, settings));
+    }
+
+    if (settings.min_stiffness_scale > 0) {
+        scale = std::max(scale, settings.min_stiffness_scale);
+    }
+
+    if (settings.max_stiffness_scale >= 0) {
+        scale = std::min(scale, settings.max_stiffness_scale);
+    }
+
+    return scale;
 }
 
 ChVector3d ComputeTangentialTraction(const ChVector3d& tangential_velocity,
@@ -69,6 +134,105 @@ ChVector3d ComputeTangentialTraction(const ChVector3d& tangential_velocity,
     return tangential_velocity * (-settings.friction_coefficient * pressure / speed);
 }
 
+std::vector<double> EstimatePatchCurvatureProxies(const ChSDFContactPatch& patch,
+                                                  const ChSDFContactPatchSampler::Settings& patch_settings) {
+    std::vector<double> curvature(patch.samples.size(), 0.0);
+    if (patch.samples.empty() || patch_settings.samples_u == 0 || patch_settings.samples_v == 0) {
+        return curvature;
+    }
+
+    std::vector<int> lookup(patch_settings.samples_u * patch_settings.samples_v, -1);
+    for (std::size_t i = 0; i < patch.samples.size(); ++i) {
+        const auto& sample = patch.samples[i];
+        if (sample.iu < patch_settings.samples_u && sample.iv < patch_settings.samples_v) {
+            lookup[sample.iv * patch_settings.samples_u + sample.iu] = static_cast<int>(i);
+        }
+    }
+
+    const double du = std::abs(GridStep(patch_settings.samples_u, patch_settings.half_length_u));
+    const double dv = std::abs(GridStep(patch_settings.samples_v, patch_settings.half_length_v));
+
+    for (std::size_t i = 0; i < patch.samples.size(); ++i) {
+        const auto& sample = patch.samples[i];
+        double sum = 0;
+        int count = 0;
+
+        const struct Neighbor2D {
+            int du;
+            int dv;
+            double distance;
+        } neighbors[] = {
+            {-1, 0, du}, {1, 0, du}, {0, -1, dv}, {0, 1, dv},
+        };
+
+        for (const auto& neighbor : neighbors) {
+            const int nu = static_cast<int>(sample.iu) + neighbor.du;
+            const int nv = static_cast<int>(sample.iv) + neighbor.dv;
+            if (nu < 0 || nv < 0 || nu >= static_cast<int>(patch_settings.samples_u) ||
+                nv >= static_cast<int>(patch_settings.samples_v) || neighbor.distance <= 1.0e-12) {
+                continue;
+            }
+
+            const int neighbor_index = lookup[nv * static_cast<int>(patch_settings.samples_u) + nu];
+            if (neighbor_index < 0) {
+                continue;
+            }
+
+            const ChVector3d delta_normal =
+                patch.samples[static_cast<std::size_t>(neighbor_index)].probe.normal_world - sample.probe.normal_world;
+            sum += delta_normal.Length() / neighbor.distance;
+            ++count;
+        }
+
+        if (count > 0) {
+            curvature[i] = sum / static_cast<double>(count);
+        }
+    }
+
+    return curvature;
+}
+
+std::vector<double> EstimateRegionCurvatureProxies(const ChSDFBrickPairRegion& region) {
+    std::vector<double> curvature(region.samples.size(), 0.0);
+    if (region.samples.empty() || region.sample_spacing <= 1.0e-12) {
+        return curvature;
+    }
+
+    std::unordered_map<CoordKey3, std::size_t, CoordKey3Hasher> lookup;
+    lookup.reserve(region.samples.size());
+    for (std::size_t i = 0; i < region.samples.size(); ++i) {
+        const auto& coord = region.samples[i].coord;
+        lookup.emplace(CoordKey3{coord.x(), coord.y(), coord.z()}, i);
+    }
+
+    const CoordKey3 neighbors[] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+
+    for (std::size_t i = 0; i < region.samples.size(); ++i) {
+        const auto& sample = region.samples[i];
+        double sum = 0;
+        int count = 0;
+
+        for (const auto& offset : neighbors) {
+            const CoordKey3 key{sample.coord.x() + offset.x, sample.coord.y() + offset.y, sample.coord.z() + offset.z};
+            const auto it = lookup.find(key);
+            if (it == lookup.end()) {
+                continue;
+            }
+
+            const ChVector3d delta_normal =
+                region.samples[it->second].contact_normal_world - sample.contact_normal_world;
+            sum += delta_normal.Length() / region.sample_spacing;
+            ++count;
+        }
+
+        if (count > 0) {
+            curvature[i] = sum / static_cast<double>(count);
+        }
+    }
+
+    return curvature;
+}
+
 }  // namespace
 
 ChVector3d ChSDFPatchKinematics::PointVelocity(const ChVector3d& point_shape, const ChFrame<>& patch_frame_shape) const {
@@ -92,13 +256,17 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
 
     const double du = GridStep(patch_settings.samples_u, patch_settings.half_length_u);
     const double dv = GridStep(patch_settings.samples_v, patch_settings.half_length_v);
+    const double resolution_length = 0.5 * (std::abs(du) + std::abs(dv));
+    const auto curvature_proxies = EstimatePatchCurvatureProxies(patch, patch_settings);
 
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
+    double local_stiffness_area_sum = 0;
 
     result.samples.reserve(patch.samples.size());
 
-    for (const auto& patch_sample : patch.samples) {
+    for (std::size_t sample_index = 0; sample_index < patch.samples.size(); ++sample_index) {
+        const auto& patch_sample = patch.samples[sample_index];
         ChSDFContactWrenchSample sample;
         sample.patch_sample = patch_sample;
 
@@ -123,8 +291,16 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
         const double damping_speed =
             pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
 
-        sample.pressure = pressure_settings.stiffness * sample.penetration +
-                          pressure_settings.damping * damping_speed + pressure_settings.adhesion_pressure;
+        sample.gradient_quality = GradientQuality(patch_sample.probe);
+        sample.curvature_proxy = curvature_proxies[sample_index];
+        sample.resolution_length = resolution_length;
+        sample.stiffness_scale = LocalStiffnessScale(sample.gradient_quality, sample.curvature_proxy,
+                                                     sample.resolution_length, pressure_settings);
+        sample.local_stiffness = pressure_settings.stiffness * sample.stiffness_scale;
+        sample.local_damping = pressure_settings.damping * std::sqrt(std::max(sample.stiffness_scale, 0.0));
+
+        sample.pressure = sample.local_stiffness * sample.penetration +
+                          sample.local_damping * damping_speed + pressure_settings.adhesion_pressure;
         sample.pressure = ClampPressure(sample.pressure, pressure_settings);
 
         if (sample.pressure > 0) {
@@ -153,6 +329,8 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
             result.active_samples++;
             result.active_area += sample.quadrature_area;
             result.integrated_pressure += sample.pressure * sample.quadrature_area;
+            local_stiffness_area_sum += sample.local_stiffness * sample.quadrature_area;
+            result.max_local_stiffness = std::max(result.max_local_stiffness, sample.local_stiffness);
             result.max_penetration = std::max(result.max_penetration, sample.penetration);
             result.max_pressure = std::max(result.max_pressure, sample.pressure);
 
@@ -167,6 +345,7 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
 
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
+        result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
     }
 
     if (pressure_weight_sum > 0) {
@@ -205,13 +384,17 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     const double dv = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_v,
                                                                                    region.suggested_patch_settings.half_length_v);
     const double quadrature_area = du * dv;
+    const double resolution_length = region.sample_spacing > 0 ? region.sample_spacing : 0.5 * (std::abs(du) + std::abs(dv));
+    const auto curvature_proxies = EstimateRegionCurvatureProxies(region);
 
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
+    double local_stiffness_area_sum = 0;
 
     result.samples.reserve(region.samples.size());
 
-    for (const auto& region_sample : region.samples) {
+    for (std::size_t sample_index = 0; sample_index < region.samples.size(); ++sample_index) {
+        const auto& region_sample = region.samples[sample_index];
         ChSDFBrickPairWrenchSample sample;
         sample.region_sample = region_sample;
         sample.point_patch = region_sample.point_patch;
@@ -231,8 +414,15 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
 
         const double damping_speed =
             pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
-        sample.pressure = pressure_settings.stiffness * sample.penetration +
-                          pressure_settings.damping * damping_speed + pressure_settings.adhesion_pressure;
+        sample.gradient_quality = 0.5 * (GradientQuality(region_sample.probe_a) + GradientQuality(region_sample.probe_b));
+        sample.curvature_proxy = curvature_proxies[sample_index];
+        sample.resolution_length = resolution_length;
+        sample.stiffness_scale = LocalStiffnessScale(sample.gradient_quality, sample.curvature_proxy,
+                                                     sample.resolution_length, pressure_settings);
+        sample.local_stiffness = pressure_settings.stiffness * sample.stiffness_scale;
+        sample.local_damping = pressure_settings.damping * std::sqrt(std::max(sample.stiffness_scale, 0.0));
+        sample.pressure = sample.local_stiffness * sample.penetration +
+                          sample.local_damping * damping_speed + pressure_settings.adhesion_pressure;
         sample.pressure = ClampPressure(sample.pressure, pressure_settings);
 
         if (sample.pressure > 0) {
@@ -269,6 +459,8 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
             result.active_samples++;
             result.active_area += sample.quadrature_area;
             result.integrated_pressure += sample.pressure * sample.quadrature_area;
+            local_stiffness_area_sum += sample.local_stiffness * sample.quadrature_area;
+            result.max_local_stiffness = std::max(result.max_local_stiffness, sample.local_stiffness);
             result.max_penetration = std::max(result.max_penetration, sample.penetration);
             result.max_pressure = std::max(result.max_pressure, sample.pressure);
 
@@ -282,6 +474,7 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
 
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
+        result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
     }
 
     if (pressure_weight_sum > 0) {
@@ -302,6 +495,7 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
     result.shape_b_frame_abs = shape_b_frame_abs;
     result.total_regions = regions.size();
     result.regions.reserve(regions.size());
+    double local_stiffness_area_sum = 0;
 
     for (const auto& region : regions) {
         auto region_result = EvaluateBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, pressure_settings);
@@ -310,6 +504,8 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
             result.active_regions++;
             result.active_area += region_result.active_area;
             result.integrated_pressure += region_result.integrated_pressure;
+            local_stiffness_area_sum += region_result.mean_local_stiffness * region_result.active_area;
+            result.max_local_stiffness = std::max(result.max_local_stiffness, region_result.max_local_stiffness);
             result.max_penetration = std::max(result.max_penetration, region_result.max_penetration);
             result.max_pressure = std::max(result.max_pressure, region_result.max_pressure);
         }
@@ -328,6 +524,7 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
 
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
+        result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
     }
 
     return result;

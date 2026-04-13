@@ -132,6 +132,10 @@ int main(int argc, char* argv[]) {
     pressure_settings.stiffness = 4.0e5;
     pressure_settings.damping = 4.0e3;
     pressure_settings.max_pressure = 2.0e6;
+    pressure_settings.gradient_quality_gain = 2.0;
+    pressure_settings.resolution_scale_gain = 1.0;
+    pressure_settings.reference_resolution_length = 0.025;
+    pressure_settings.min_stiffness_scale = 0.25;
     pressure_settings.friction_coefficient = 0.20;
     pressure_settings.tangential_velocity_regularization = 0.02;
 
@@ -143,10 +147,12 @@ int main(int argc, char* argv[]) {
     double max_abs_tangential_force = 0;
     double min_height = std::numeric_limits<double>::infinity();
     bool finite = true;
+    ChSDFShapePairContactResult last_result;
 
     while (sys.GetChTime() < end_time) {
         pair.EmptyAccumulators();
         const auto result = pair.EvaluateAndApply(pair_settings, region_settings, pressure_settings);
+        last_result = result;
 
         if (result.HasActiveContact()) {
             ++contact_steps;
@@ -163,6 +169,7 @@ int main(int argc, char* argv[]) {
             std::cout << "t=" << sys.GetChTime() << "  x=" << moving_body->GetPos().x()
                       << "  y=" << moving_body->GetPos().y() << "  vx=" << moving_body->GetLinVel().x()
                       << "  vy=" << moving_body->GetLinVel().y() << "  active_regions=" << result.active_regions
+                      << "  k_mean=" << result.mean_local_stiffness << "  k_max=" << result.max_local_stiffness
                       << "  Fx=" << result.wrench_world_b.force.x() << "  Fy=" << result.wrench_world_b.force.y()
                       << "\n";
         }
@@ -178,6 +185,8 @@ int main(int argc, char* argv[]) {
     std::cout << "  moving vy:     " << moving_body->GetLinVel().y() << "\n";
     std::cout << "  min y:         " << min_height << "\n";
     std::cout << "  contact steps: " << contact_steps << "\n";
+    std::cout << "  mean k:        " << last_result.mean_local_stiffness << "\n";
+    std::cout << "  max k:         " << last_result.max_local_stiffness << "\n";
     std::cout << "  max |Fx|:      " << max_abs_tangential_force << "\n";
     std::cout << "  max Fy:        " << max_upward_force << "\n";
 

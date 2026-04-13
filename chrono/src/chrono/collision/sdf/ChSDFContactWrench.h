@@ -47,6 +47,16 @@ struct ChApi ChSDFNormalPressureSettings {
     double distance_offset = 0;
     double adhesion_pressure = 0;
     double max_pressure = -1;
+    /// Exponential attenuation applied to the local gradient-quality indicator q = ||grad phi|| - 1|.
+    double gradient_quality_gain = 0;
+    /// Rational attenuation applied to a local curvature proxy extracted from neighboring normal variation.
+    double curvature_gain = 0;
+    /// Rational attenuation applied to the local resolution length h.
+    double resolution_scale_gain = 0;
+    /// Nominal resolution length used to normalize h. If <= 0, the raw local length is used.
+    double reference_resolution_length = -1;
+    double min_stiffness_scale = 0;
+    double max_stiffness_scale = -1;
     /// Regularized Coulomb friction coefficient used for the tangential traction density.
     double friction_coefficient = 0;
     /// Velocity scale used in the smooth traction law t = -mu * p * vt / sqrt(|vt|^2 + eps^2).
@@ -67,6 +77,12 @@ struct ChApi ChSDFContactWrenchSample {
     double penetration = 0;
     double normal_speed = 0;
     double tangential_speed = 0;
+    double gradient_quality = 0;
+    double curvature_proxy = 0;
+    double resolution_length = 0;
+    double stiffness_scale = 1;
+    double local_stiffness = 0;
+    double local_damping = 0;
     double pressure = 0;
 
     ChVector3d point_shape = VNULL;
@@ -101,6 +117,8 @@ struct ChApi ChSDFContactWrenchResult {
     double active_area = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
+    double mean_local_stiffness = 0;
+    double max_local_stiffness = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
@@ -123,6 +141,12 @@ struct ChApi ChSDFBrickPairWrenchSample {
     double penetration = 0;
     double normal_speed = 0;
     double tangential_speed = 0;
+    double gradient_quality = 0;
+    double curvature_proxy = 0;
+    double resolution_length = 0;
+    double stiffness_scale = 1;
+    double local_stiffness = 0;
+    double local_damping = 0;
     double pressure = 0;
 
     ChVector3d point_patch = VNULL;
@@ -156,6 +180,8 @@ struct ChApi ChSDFBrickPairWrenchResult {
     double active_area = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
+    double mean_local_stiffness = 0;
+    double max_local_stiffness = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
@@ -184,6 +210,8 @@ struct ChApi ChSDFShapePairContactResult {
     double active_area = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
+    double mean_local_stiffness = 0;
+    double max_local_stiffness = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
