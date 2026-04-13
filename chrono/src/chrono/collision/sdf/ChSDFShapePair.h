@@ -57,6 +57,7 @@ class ChApi ChSDFShapePair {
     /// Set the SDF shape frames in the local reference frame used by the owning body collision models.
     void SetShapeAFrame(const ChFrame<>& frame) { m_shape_a_frame = frame; }
     void SetShapeBFrame(const ChFrame<>& frame) { m_shape_b_frame = frame; }
+    void SetChartSettings(const ChSDFRegionChartSettings& settings) { m_chart_settings = settings; }
 
     ChBody* GetBodyA() const { return m_body_a; }
     ChBody* GetBodyB() const { return m_body_b; }
@@ -66,6 +67,7 @@ class ChApi ChSDFShapePair {
 
     const ChFrame<>& GetShapeAFrame() const { return m_shape_a_frame; }
     const ChFrame<>& GetShapeBFrame() const { return m_shape_b_frame; }
+    const ChSDFRegionChartSettings& GetChartSettings() const { return m_chart_settings; }
     StabilizationSettings& GetStabilizationSettings() { return m_stabilization_settings; }
     const StabilizationSettings& GetStabilizationSettings() const { return m_stabilization_settings; }
 
@@ -150,6 +152,7 @@ class ChApi ChSDFShapePair {
 
     ChFrame<> m_shape_a_frame;
     ChFrame<> m_shape_b_frame;
+    ChSDFRegionChartSettings m_chart_settings;
 
     StabilizationSettings m_stabilization_settings;
     std::vector<RegionHistoryState> m_region_history;

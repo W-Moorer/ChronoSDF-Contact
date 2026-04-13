@@ -698,6 +698,7 @@ set(Chrono_collision_SOURCES
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
     collision/sdf/ChSDFContactSurface.cpp
+    collision/sdf/ChSDFPFCEvaluator.cpp
     collision/sdf/ChSDFShapePair.cpp
     collision/sdf/ChSDFContactWrench.cpp
     )
@@ -737,6 +738,7 @@ set(Chrono_collision_HEADERS
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
     collision/sdf/ChSDFContactSurface.h
+    collision/sdf/ChSDFPFCEvaluator.h
     collision/sdf/ChSDFShapePair.h
     collision/sdf/ChSDFContactWrench.h
     )
@@ -751,6 +753,7 @@ set(Chrono_collision_sdf_SOURCES
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
     collision/sdf/ChSDFContactSurface.cpp
+    collision/sdf/ChSDFPFCEvaluator.cpp
     collision/sdf/ChSDFShapePair.cpp
     collision/sdf/ChSDFContactWrench.cpp
     )
@@ -763,6 +766,7 @@ set(Chrono_collision_sdf_HEADERS
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
     collision/sdf/ChSDFContactSurface.h
+    collision/sdf/ChSDFPFCEvaluator.h
     collision/sdf/ChSDFShapePair.h
     collision/sdf/ChSDFContactWrench.h
     )

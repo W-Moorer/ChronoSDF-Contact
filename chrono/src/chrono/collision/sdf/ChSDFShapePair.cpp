@@ -16,6 +16,7 @@
 #include <limits>
 
 #include "chrono/core/ChFrameMoving.h"
+#include "chrono/collision/sdf/ChSDFPFCEvaluator.h"
 
 namespace chrono {
 namespace {
@@ -192,12 +193,15 @@ ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
 
     const ChFrame<> shape_a_frame_abs = GetShapeAFrameAbs();
     const ChFrame<> shape_b_frame_abs = GetShapeBFrameAbs();
-    const auto regions = StabilizeRegions(BuildContactRegions(pair_settings, region_settings), shape_a_frame_abs, shape_b_frame_abs);
+    const auto regions =
+        StabilizeRegions(BuildContactRegions(pair_settings, region_settings), shape_a_frame_abs, shape_b_frame_abs);
+    const auto surfaces = ChSDFContactSurfaceBuilder::BuildRegionSurfaces(
+        *m_shape_a, shape_a_frame_abs, *m_shape_b, shape_b_frame_abs, regions, m_chart_settings);
 
-    auto result = ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(
-        regions, GetShapeAFrameAbsMoving(), GetShapeBFrameAbsMoving(),
-        ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_a),
-        ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_b), pressure_settings);
+    auto result = ChSDFPFCEvaluator::EvaluateRegions(surfaces, GetShapeAFrameAbsMoving(), GetShapeBFrameAbsMoving(),
+                                                     ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_a),
+                                                     ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_b),
+                                                     pressure_settings);
     ApplyActivationHysteresis(result);
     UpdateHistory(result);
     return result;

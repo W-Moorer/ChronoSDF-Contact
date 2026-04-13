@@ -18,6 +18,7 @@
 
 #include "chrono/collision/ChCollisionShapeSDF.h"
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
+#include "chrono/collision/sdf/ChSDFContactSurface.h"
 #include "chrono/core/ChFrame.h"
 #include "chrono/core/ChFrameMoving.h"
 #include "chrono/core/ChMatrix33.h"
@@ -156,6 +157,7 @@ struct ChApi ChSDFContactWrenchResult {
 /// One sample contribution in the distributed dual-SDF region-to-wrench aggregation.
 struct ChApi ChSDFBrickPairWrenchSample {
     ChSDFBrickPairRegionSample region_sample;
+    ChSDFContactQuadraturePoint quadrature_point;
 
     bool active = false;
 
