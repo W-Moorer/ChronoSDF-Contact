@@ -38,7 +38,7 @@ struct ChApi ChSDFPatchKinematics {
     ChVector3d PointVelocity(const ChVector3d& point_shape, const ChFrame<>& patch_frame_shape) const;
 };
 
-/// Normal-only pressure law used to aggregate a distributed SDF contact patch.
+/// Normal pressure law with optional regularized tangential traction.
 /// Coefficients are interpreted as pressure-density coefficients:
 ///   pressure = stiffness * penetration + damping * closing_speed + adhesion_pressure
 struct ChApi ChSDFNormalPressureSettings {
@@ -47,6 +47,10 @@ struct ChApi ChSDFNormalPressureSettings {
     double distance_offset = 0;
     double adhesion_pressure = 0;
     double max_pressure = -1;
+    /// Regularized Coulomb friction coefficient used for the tangential traction density.
+    double friction_coefficient = 0;
+    /// Velocity scale used in the smooth traction law t = -mu * p * vt / sqrt(|vt|^2 + eps^2).
+    double tangential_velocity_regularization = 1.0e-3;
 
     bool use_only_closing_speed = true;
     bool clamp_negative_pressure = true;
@@ -62,10 +66,16 @@ struct ChApi ChSDFContactWrenchSample {
     double signed_gap = 0;
     double penetration = 0;
     double normal_speed = 0;
+    double tangential_speed = 0;
     double pressure = 0;
 
     ChVector3d point_shape = VNULL;
     ChVector3d point_patch = VNULL;
+    ChVector3d tangential_velocity_shape = VNULL;
+    /// Tangential traction density expressed in the SDF shape frame.
+    ChVector3d traction_shape = VNULL;
+    /// Tangential traction density expressed in the patch frame.
+    ChVector3d traction_patch = VNULL;
     ChVector3d force_shape = VNULL;
     ChVector3d torque_shape = VNULL;
     ChVector3d force_patch = VNULL;
@@ -112,9 +122,13 @@ struct ChApi ChSDFBrickPairWrenchSample {
     double signed_gap = 0;
     double penetration = 0;
     double normal_speed = 0;
+    double tangential_speed = 0;
     double pressure = 0;
 
     ChVector3d point_patch = VNULL;
+    ChVector3d tangential_velocity_world = VNULL;
+    /// Tangential traction density expressed in the absolute frame.
+    ChVector3d traction_world = VNULL;
     ChVector3d force_world = VNULL;
     ChVector3d force_shape_a = VNULL;
     ChVector3d torque_shape_a = VNULL;
@@ -181,7 +195,7 @@ struct ChApi ChSDFShapePairContactResult {
 /// Distributed contact evaluator that turns a sampled SDF patch into a net wrench.
 class ChApi ChSDFContactWrenchEvaluator {
   public:
-    /// Evaluate a pre-sampled patch against a normal-only penalty law.
+    /// Evaluate a pre-sampled patch against a penalty law with optional tangential traction.
     static ChSDFContactWrenchResult EvaluatePatch(const ChSDFContactPatch& patch,
                                                   const ChSDFContactPatchSampler::Settings& patch_settings,
                                                   const ChSDFPatchKinematics& relative_kinematics,
@@ -194,7 +208,7 @@ class ChApi ChSDFContactWrenchEvaluator {
                                                        const ChSDFPatchKinematics& relative_kinematics,
                                                        const ChSDFNormalPressureSettings& pressure_settings);
 
-    /// Evaluate one parameterized dual-SDF connected region against the same normal-only pressure law.
+    /// Evaluate one parameterized dual-SDF connected region against the same pressure and traction law.
     static ChSDFBrickPairWrenchResult EvaluateBrickPairRegion(const ChSDFBrickPairRegion& region,
                                                               const ChFrameMoving<>& shape_a_frame_abs,
                                                               const ChFrameMoving<>& shape_b_frame_abs,

@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
 
     auto moving_body = chrono_types::make_shared<ChBodyEasyBox>(1.0, 1.0, 1.0, 1000.0, false, false);
     moving_body->SetPos(ChVector3d(0, 0.98, 0));
-    moving_body->SetLinVel(ChVector3d(0, -0.05, 0));
+    moving_body->SetLinVel(ChVector3d(0.20, -0.05, 0));
     sys.Add(moving_body);
 
     auto material = chrono_types::make_shared<ChContactMaterialNSC>();
@@ -132,12 +132,15 @@ int main(int argc, char* argv[]) {
     pressure_settings.stiffness = 4.0e5;
     pressure_settings.damping = 4.0e3;
     pressure_settings.max_pressure = 2.0e6;
+    pressure_settings.friction_coefficient = 0.20;
+    pressure_settings.tangential_velocity_regularization = 0.02;
 
     const double step_size = 1.0e-3;
     const double end_time = 0.25;
 
     std::size_t contact_steps = 0;
     double max_upward_force = 0;
+    double max_abs_tangential_force = 0;
     double min_height = std::numeric_limits<double>::infinity();
     bool finite = true;
 
@@ -148,16 +151,20 @@ int main(int argc, char* argv[]) {
         if (result.HasActiveContact()) {
             ++contact_steps;
             max_upward_force = std::max(max_upward_force, result.wrench_world_b.force.y());
+            max_abs_tangential_force = std::max(max_abs_tangential_force, std::abs(result.wrench_world_b.force.x()));
         }
 
         finite = finite && IsFiniteWrench(result.wrench_world_a) && IsFiniteWrench(result.wrench_world_b) &&
-                 std::isfinite(moving_body->GetPos().y()) && std::isfinite(moving_body->GetLinVel().y());
+                 std::isfinite(moving_body->GetPos().x()) && std::isfinite(moving_body->GetPos().y()) &&
+                 std::isfinite(moving_body->GetLinVel().x()) && std::isfinite(moving_body->GetLinVel().y());
         min_height = std::min(min_height, moving_body->GetPos().y());
 
         if (static_cast<int>(std::round(sys.GetChTime() / step_size)) % 50 == 0) {
-            std::cout << "t=" << sys.GetChTime() << "  y=" << moving_body->GetPos().y()
+            std::cout << "t=" << sys.GetChTime() << "  x=" << moving_body->GetPos().x()
+                      << "  y=" << moving_body->GetPos().y() << "  vx=" << moving_body->GetLinVel().x()
                       << "  vy=" << moving_body->GetLinVel().y() << "  active_regions=" << result.active_regions
-                      << "  Fy=" << result.wrench_world_b.force.y() << "\n";
+                      << "  Fx=" << result.wrench_world_b.force.x() << "  Fy=" << result.wrench_world_b.force.y()
+                      << "\n";
         }
 
         sys.DoStepDynamics(step_size);
@@ -165,10 +172,13 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nFinal state\n";
     std::cout << "  time:          " << sys.GetChTime() << "\n";
+    std::cout << "  moving x:      " << moving_body->GetPos().x() << "\n";
     std::cout << "  moving y:      " << moving_body->GetPos().y() << "\n";
+    std::cout << "  moving vx:     " << moving_body->GetLinVel().x() << "\n";
     std::cout << "  moving vy:     " << moving_body->GetLinVel().y() << "\n";
     std::cout << "  min y:         " << min_height << "\n";
     std::cout << "  contact steps: " << contact_steps << "\n";
+    std::cout << "  max |Fx|:      " << max_abs_tangential_force << "\n";
     std::cout << "  max Fy:        " << max_upward_force << "\n";
 
     if (!finite) {
@@ -179,6 +189,11 @@ int main(int argc, char* argv[]) {
     if (contact_steps == 0) {
         std::cerr << "The demo did not detect any active contact regions.\n";
         return 4;
+    }
+
+    if (max_abs_tangential_force <= 1.0) {
+        std::cerr << "The demo did not detect any meaningful tangential traction.\n";
+        return 5;
     }
 
     return 0;

@@ -41,6 +41,34 @@ double ClampPressure(double pressure, const ChSDFNormalPressureSettings& setting
     return pressure;
 }
 
+ChVector3d ComputeTangentialTraction(const ChVector3d& tangential_velocity,
+                                     double pressure,
+                                     const ChSDFNormalPressureSettings& settings) {
+    if (pressure <= 0 || settings.friction_coefficient <= 0) {
+        return VNULL;
+    }
+
+    const double speed2 = tangential_velocity.Length2();
+    if (speed2 <= 1.0e-24) {
+        return VNULL;
+    }
+
+    const double regularization =
+        std::max(settings.tangential_velocity_regularization, 0.0);
+
+    if (regularization > 0) {
+        const double denom = std::sqrt(speed2 + regularization * regularization);
+        return tangential_velocity * (-settings.friction_coefficient * pressure / denom);
+    }
+
+    const double speed = std::sqrt(speed2);
+    if (speed <= 1.0e-12) {
+        return VNULL;
+    }
+
+    return tangential_velocity * (-settings.friction_coefficient * pressure / speed);
+}
+
 }  // namespace
 
 ChVector3d ChSDFPatchKinematics::PointVelocity(const ChVector3d& point_shape, const ChFrame<>& patch_frame_shape) const {
@@ -86,7 +114,11 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
 
         const ChVector3d point_velocity =
             relative_kinematics.PointVelocity(sample.point_shape, patch.patch_frame);
-        sample.normal_speed = -Vdot(point_velocity, patch_sample.probe.normal_world);
+        const double normal_velocity_component = Vdot(point_velocity, patch_sample.probe.normal_world);
+        sample.normal_speed = -normal_velocity_component;
+        sample.tangential_velocity_shape =
+            point_velocity - patch_sample.probe.normal_world * normal_velocity_component;
+        sample.tangential_speed = sample.tangential_velocity_shape.Length();
 
         const double damping_speed =
             pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
@@ -97,12 +129,19 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
 
         if (sample.pressure > 0) {
             sample.active = true;
-            sample.force_shape = patch_sample.probe.normal_world * (sample.pressure * sample.quadrature_area);
+            sample.traction_shape =
+                ComputeTangentialTraction(sample.tangential_velocity_shape, sample.pressure, pressure_settings);
+
+            const ChVector3d normal_force_shape =
+                patch_sample.probe.normal_world * (sample.pressure * sample.quadrature_area);
+            const ChVector3d tangential_force_shape = sample.traction_shape * sample.quadrature_area;
+            sample.force_shape = normal_force_shape + tangential_force_shape;
 
             ChWrenchd point_wrench_shape = {sample.force_shape, Vcross(sample.point_shape, sample.force_shape)};
             ChWrenchd point_wrench_patch = patch.patch_frame.TransformWrenchParentToLocal(point_wrench_shape);
 
             sample.torque_shape = point_wrench_shape.torque;
+            sample.traction_patch = patch.patch_frame.TransformDirectionParentToLocal(sample.traction_shape);
             sample.force_patch = point_wrench_patch.force;
             sample.torque_patch = point_wrench_patch.torque;
 
@@ -184,7 +223,11 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
         const ChVector3d speed_world_a = shape_a_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_a);
         const ChVector3d speed_world_b = shape_b_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_b);
         const ChVector3d relative_speed_world = speed_world_b - speed_world_a;
-        sample.normal_speed = -Vdot(relative_speed_world, region_sample.contact_normal_world);
+        const double normal_velocity_component = Vdot(relative_speed_world, region_sample.contact_normal_world);
+        sample.normal_speed = -normal_velocity_component;
+        sample.tangential_velocity_world =
+            relative_speed_world - region_sample.contact_normal_world * normal_velocity_component;
+        sample.tangential_speed = sample.tangential_velocity_world.Length();
 
         const double damping_speed =
             pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
@@ -194,8 +237,13 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
 
         if (sample.pressure > 0) {
             sample.active = true;
+            sample.traction_world =
+                ComputeTangentialTraction(sample.tangential_velocity_world, sample.pressure, pressure_settings);
 
-            const ChVector3d force_world_b = region_sample.contact_normal_world * (sample.pressure * sample.quadrature_area);
+            const ChVector3d normal_force_world_b =
+                region_sample.contact_normal_world * (sample.pressure * sample.quadrature_area);
+            const ChVector3d tangential_force_world_b = sample.traction_world * sample.quadrature_area;
+            const ChVector3d force_world_b = normal_force_world_b + tangential_force_world_b;
             const ChVector3d force_world_a = -force_world_b;
 
             const ChVector3d torque_world_a =
