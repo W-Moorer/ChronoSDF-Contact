@@ -159,3 +159,6 @@ chrono/data/models/
 
 # Optional helper content not needed for the trimmed core upload
 chrono/contrib/
+
+reference/
+drake-master/
