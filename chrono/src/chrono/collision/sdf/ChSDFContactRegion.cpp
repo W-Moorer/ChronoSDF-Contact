@@ -45,6 +45,33 @@ CoordKey MakeCoordKey(const ChVector3i& coord) {
     return CoordKey{coord.x(), coord.y(), coord.z()};
 }
 
+struct CarrierKey {
+    int axis = -1;
+    int x = 0;
+    int y = 0;
+    int z = 0;
+
+    bool operator==(const CarrierKey& other) const {
+        return axis == other.axis && x == other.x && y == other.y && z == other.z;
+    }
+};
+
+struct CarrierKeyHasher {
+    std::size_t operator()(const CarrierKey& key) const {
+        std::size_t seed = static_cast<std::size_t>(static_cast<uint32_t>(key.axis + 17) * 12582917u);
+        seed ^= static_cast<std::size_t>(static_cast<uint32_t>(key.x) * 73856093u);
+        seed ^= static_cast<std::size_t>(static_cast<uint32_t>(key.y) * 19349663u);
+        seed ^= static_cast<std::size_t>(static_cast<uint32_t>(key.z) * 83492791u);
+        return seed;
+    }
+};
+
+CarrierKey MakeCarrierKey(int axis, const ChVector3d& surfel_index) {
+    return CarrierKey{axis, static_cast<int>(std::llround(2.0 * surfel_index.x())),
+                      static_cast<int>(std::llround(2.0 * surfel_index.y())),
+                      static_cast<int>(std::llround(2.0 * surfel_index.z()))};
+}
+
 double ResolvePositive(double value, double fallback) {
     return value > 0 ? value : fallback;
 }
@@ -202,6 +229,236 @@ double ResolveSampleMaxAbsDistance(const ChNanoVDBGridInfo& info_a,
     return 1.5 * spacing;
 }
 
+ChVector3d SafeNormalized(const ChVector3d& v, const ChVector3d& fallback = VECT_Z) {
+    const double length = v.Length();
+    return length > 1.0e-12 ? (v / length) : fallback;
+}
+
+ChVector3d AxisUnit(int axis) {
+    switch (axis) {
+        case 0:
+            return VECT_X;
+        case 1:
+            return VECT_Y;
+        default:
+            return VECT_Z;
+    }
+}
+
+double FaceAreaForAxis(int axis, const ChVector3d& voxel_size) {
+    switch (axis) {
+        case 0:
+            return voxel_size.y() * voxel_size.z();
+        case 1:
+            return voxel_size.x() * voxel_size.z();
+        default:
+            return voxel_size.x() * voxel_size.y();
+    }
+}
+
+int DominantAxis(const ChVector3d& v) {
+    const double ax = std::abs(v.x());
+    const double ay = std::abs(v.y());
+    const double az = std::abs(v.z());
+
+    if (ax >= ay && ax >= az) {
+        return 0;
+    }
+    if (ay >= az) {
+        return 1;
+    }
+    return 2;
+}
+
+bool HasSurfaceCrossing(double d0, double d1, double threshold) {
+    const double eps = std::max(threshold * 1.0e-3, 1.0e-12);
+
+    if (std::abs(d0) <= eps && std::abs(d1) <= eps) {
+        return false;
+    }
+    if (std::abs(d0) <= eps || std::abs(d1) <= eps) {
+        return true;
+    }
+
+    return d0 * d1 < 0.0;
+}
+
+struct NormalProjectionResult {
+    bool valid = false;
+    double signed_gap = 0;
+    ChVector3d projected_world = VNULL;
+    ChVector3d projected_shape_b = VNULL;
+    ChSDFProbeResult projected_probe_b;
+};
+
+bool FindZeroAlongIndexSegment(const ChNanoVDBLevelSet& level_set,
+                               const ChVector3d& index_begin,
+                               const ChVector3d& index_end,
+                               double f_begin,
+                               double f_end,
+                               ChSDFProbeResult& result) {
+    const double distance_tolerance = 1.0e-8;
+    const double index_tolerance = 1.0e-8;
+
+    if (std::abs(f_begin) <= distance_tolerance) {
+        result = level_set.ProbeIndex(index_begin);
+        return result.valid;
+    }
+    if (std::abs(f_end) <= distance_tolerance) {
+        result = level_set.ProbeIndex(index_end);
+        return result.valid;
+    }
+    if (f_begin * f_end > 0.0) {
+        return false;
+    }
+
+    ChVector3d low = index_begin;
+    ChVector3d high = index_end;
+    double flow = f_begin;
+
+    for (int iter = 0; iter < 32; ++iter) {
+        const ChVector3d mid = 0.5 * (low + high);
+        const ChSDFProbeResult probe_mid = level_set.ProbeIndex(mid);
+        if (!probe_mid.valid) {
+            return false;
+        }
+
+        if (std::abs(probe_mid.distance) <= distance_tolerance || (high - low).Length() <= index_tolerance) {
+            result = probe_mid;
+            return true;
+        }
+
+        if (flow * probe_mid.distance <= 0.0) {
+            high = mid;
+        } else {
+            low = mid;
+            flow = probe_mid.distance;
+        }
+    }
+
+    result = level_set.ProbeIndex(0.5 * (low + high));
+    return result.valid;
+}
+
+bool FindZeroAlongRay(const ChCollisionShapeSDF& shape_b,
+                      const ChFrame<>& shape_b_frame_abs,
+                      const ChVector3d& origin_world,
+                      const ChVector3d& ray_direction_world,
+                      double s_begin,
+                      double s_end,
+                      double f_begin,
+                      double f_end,
+                      NormalProjectionResult& result) {
+    if (f_begin * f_end > 0.0) {
+        return false;
+    }
+
+    double low = s_begin;
+    double high = s_end;
+    double flow = f_begin;
+    double fhigh = f_end;
+
+    for (int iter = 0; iter < 32; ++iter) {
+        const double mid = 0.5 * (low + high);
+        const ChVector3d mid_world = origin_world + ray_direction_world * mid;
+        const ChSDFProbeResult probe_mid =
+            shape_b.ProbeLocal(shape_b_frame_abs.TransformPointParentToLocal(mid_world));
+        if (!probe_mid.valid) {
+            return false;
+        }
+
+        if (std::abs(probe_mid.distance) <= 1.0e-8 || std::abs(high - low) <= 1.0e-8) {
+            result.valid = true;
+            result.signed_gap = mid;
+            result.projected_world = mid_world;
+            result.projected_shape_b = shape_b_frame_abs.TransformPointParentToLocal(mid_world);
+            result.projected_probe_b = probe_mid;
+            return true;
+        }
+
+        if (flow * probe_mid.distance <= 0.0) {
+            high = mid;
+            fhigh = probe_mid.distance;
+        } else {
+            low = mid;
+            flow = probe_mid.distance;
+        }
+    }
+
+    const double root = 0.5 * (low + high);
+    const ChVector3d root_world = origin_world + ray_direction_world * root;
+    const ChSDFProbeResult probe_root =
+        shape_b.ProbeLocal(shape_b_frame_abs.TransformPointParentToLocal(root_world));
+    if (!probe_root.valid) {
+        return false;
+    }
+
+    result.valid = true;
+    result.signed_gap = root;
+    result.projected_world = root_world;
+    result.projected_shape_b = shape_b_frame_abs.TransformPointParentToLocal(root_world);
+    result.projected_probe_b = probe_root;
+    return true;
+}
+
+NormalProjectionResult ProjectPointToShapeAlongNormal(const ChCollisionShapeSDF& shape_b,
+                                                      const ChFrame<>& shape_b_frame_abs,
+                                                      const ChVector3d& carrier_world,
+                                                      const ChVector3d& carrier_normal_world,
+                                                      double max_search,
+                                                      double step_length) {
+    NormalProjectionResult best;
+
+    const ChVector3d direction = SafeNormalized(carrier_normal_world, VECT_Y);
+    const ChSDFProbeResult probe0 = shape_b.ProbeLocal(shape_b_frame_abs.TransformPointParentToLocal(carrier_world));
+    if (!probe0.valid) {
+        return best;
+    }
+
+    if (std::abs(probe0.distance) <= 1.0e-8) {
+        best.valid = true;
+        best.signed_gap = 0;
+        best.projected_world = carrier_world;
+        best.projected_shape_b = shape_b_frame_abs.TransformPointParentToLocal(carrier_world);
+        best.projected_probe_b = probe0;
+        return best;
+    }
+
+    const double safe_step = step_length > 1.0e-6 ? step_length : 1.0e-3;
+    const int max_steps = std::max(2, static_cast<int>(std::ceil(max_search / safe_step)));
+
+    for (const double sign : {1.0, -1.0}) {
+        double prev_s = 0.0;
+        double prev_f = probe0.distance;
+
+        for (int step = 1; step <= max_steps; ++step) {
+            const double current_s = sign * safe_step * static_cast<double>(step);
+            const ChVector3d current_world = carrier_world + direction * current_s;
+            const ChSDFProbeResult current_probe =
+                shape_b.ProbeLocal(shape_b_frame_abs.TransformPointParentToLocal(current_world));
+            if (!current_probe.valid) {
+                break;
+            }
+
+            if (prev_f * current_probe.distance <= 0.0) {
+                NormalProjectionResult candidate;
+                if (FindZeroAlongRay(shape_b, shape_b_frame_abs, carrier_world, direction, prev_s, current_s, prev_f,
+                                     current_probe.distance, candidate)) {
+                    if (!best.valid || std::abs(candidate.signed_gap) < std::abs(best.signed_gap)) {
+                        best = candidate;
+                    }
+                }
+                break;
+            }
+
+            prev_s = current_s;
+            prev_f = current_probe.distance;
+        }
+    }
+
+    return best;
+}
+
 double NeighborDistanceThreshold(double sample_spacing, int neighbor_mode) {
     const double safe_spacing = sample_spacing > 1.0e-12 ? sample_spacing : 1.0;
     if (neighbor_mode <= 6) {
@@ -230,21 +487,6 @@ bool PointInsideAABB(const ChVector3d& point, const ChAABB& aabb, double margin)
            point.z() >= aabb.min.z() - margin && point.z() <= aabb.max.z() + margin;
 }
 
-double EstimateSurfaceAreaWeight(const ChVector3d& normal_shape, const ChVector3d& voxel_size) {
-    const double nx = std::abs(normal_shape.x());
-    const double ny = std::abs(normal_shape.y());
-    const double nz = std::abs(normal_shape.z());
-
-    if (nx >= ny && nx >= nz) {
-        return (voxel_size.y() * voxel_size.z()) / std::max(nx, 1.0e-12);
-    }
-    if (ny >= nz) {
-        return (voxel_size.x() * voxel_size.z()) / std::max(ny, 1.0e-12);
-    }
-
-    return (voxel_size.x() * voxel_size.y()) / std::max(nz, 1.0e-12);
-}
-
 IndexRange ComputeGridRange(double min_value, double max_value, double origin, double spacing) {
     IndexRange range;
     range.min = static_cast<int>(std::ceil((min_value - origin) / spacing));
@@ -257,12 +499,6 @@ IndexRange ComputeGridRange(double min_value, double max_value, double origin, d
     }
 
     return range;
-}
-
-ChVector3d SurfacePoint(const ChVector3d& query_point_shape,
-                        const ChSDFProbeResult& probe_shape,
-                        const ChVector3d& normal_shape) {
-    return query_point_shape - normal_shape * probe_shape.distance;
 }
 
 ChVector3d ProjectOntoTangent(const ChVector3d& direction, const ChVector3d& normal) {
@@ -309,7 +545,7 @@ ChVector3d ChoosePatchTangent(const ChSDFBrickPairRegion& region, const ChVector
 bool PairSamplesAreConnected(const ChSDFBrickPairRegionSample& a,
                              const ChSDFBrickPairRegionSample& b,
                              const ChSDFContactRegionBuilder::Settings& settings) {
-    if (settings.max_distance_jump >= 0 && std::abs(a.distance_b - b.distance_b) > settings.max_distance_jump) {
+    if (settings.max_distance_jump >= 0 && std::abs(a.normal_gap - b.normal_gap) > settings.max_distance_jump) {
         return false;
     }
 
@@ -391,6 +627,31 @@ void FinalizeBrickPairRegion(ChSDFBrickPairRegion& region,
     }
     if (region.suggested_patch_settings.samples_v % 2 == 0) {
         region.suggested_patch_settings.samples_v += 1;
+    }
+}
+
+void FilterBrickPairRegionByDominantNormal(ChSDFBrickPairRegion& region, double min_region_normal_cosine) {
+    if (region.samples.empty() || min_region_normal_cosine <= -1.0) {
+        return;
+    }
+
+    ChVector3d dominant_normal = VNULL;
+    for (const auto& sample : region.samples) {
+        dominant_normal += sample.contact_normal_world;
+    }
+    dominant_normal = SafeNormalized(dominant_normal, VECT_Z);
+
+    std::vector<ChSDFBrickPairRegionSample> filtered_samples;
+    filtered_samples.reserve(region.samples.size());
+    for (const auto& sample : region.samples) {
+        const ChVector3d sample_normal = SafeNormalized(sample.contact_normal_world, dominant_normal);
+        if (Vdot(sample_normal, dominant_normal) >= min_region_normal_cosine) {
+            filtered_samples.push_back(sample);
+        }
+    }
+
+    if (!filtered_samples.empty() && filtered_samples.size() < region.samples.size()) {
+        region.samples = std::move(filtered_samples);
     }
 }
 
@@ -671,7 +932,10 @@ std::vector<ChSDFBrickPairRegionSample> ChSDFContactRegionBuilder::BuildBrickPai
         info_a.valid && info_a.voxel_size.x() > 0 && info_a.voxel_size.y() > 0 && info_a.voxel_size.z() > 0
             ? info_a.voxel_size
             : ChVector3d(spacing, spacing, spacing);
-    std::unordered_map<CoordKey, std::size_t, CoordKeyHasher> sample_lookup;
+    const double near_surface_threshold = 0.5 * std::max(MinComponent(voxel_size_a), 1.0e-6);
+    const double projection_search = std::max(2.0 * max_abs_distance, 2.0 * spacing);
+    const double projection_step = 0.5 * std::max(MinComponent(voxel_size_a), 1.0e-6);
+    std::unordered_map<CarrierKey, std::size_t, CarrierKeyHasher> sample_lookup;
     sample_lookup.reserve(brick_pairs_by_a.size() * 64);
 
     for (const auto& item : brick_pairs_by_a) {
@@ -689,122 +953,123 @@ std::vector<ChSDFBrickPairRegionSample> ChSDFContactRegionBuilder::BuildBrickPai
         for (int ix = bbox.min.x(); ix <= bbox.max.x(); ++ix) {
             for (int iy = bbox.min.y(); iy <= bbox.max.y(); ++iy) {
                 for (int iz = bbox.min.z(); iz <= bbox.max.z(); ++iz) {
-                    const ChSDFProbeResult center_probe_a =
-                        level_set_a->ProbeIndex(ChVector3d(ix + 0.5, iy + 0.5, iz + 0.5));
-                    if (!center_probe_a.valid) {
-                        continue;
-                    }
-
-                    if (std::abs(center_probe_a.distance) > max_abs_distance) {
-                        continue;
-                    }
-
-                    const bool surface_like =
-                        center_probe_a.zero_crossing || std::abs(center_probe_a.distance) <= 0.5 * spacing;
-                    if (!surface_like) {
-                        continue;
-                    }
-                    if (settings.require_zero_crossing && !center_probe_a.zero_crossing) {
-                        continue;
-                    }
-
-                    const double normal_a_length = center_probe_a.normal_world.Length();
-                    if (normal_a_length <= 1.0e-12) {
-                        continue;
-                    }
-
-                    const ChVector3d normal_shape_a = center_probe_a.normal_world / normal_a_length;
-                    const ChVector3d surface_shape_a =
-                        SurfacePoint(center_probe_a.point_world, center_probe_a, normal_shape_a);
-                    const ChVector3d surface_world_a =
-                        shape_a_frame_abs.TransformPointLocalToParent(surface_shape_a);
-
-                    if (item.second.empty()) {
-                        continue;
-                    }
-                    const std::size_t brick_b_index = item.second.front()->brick_b_index;
-
-                    const ChSDFProbeResult surface_probe_a = shape_a.ProbeLocal(surface_shape_a);
-                    if (!surface_probe_a.valid) {
-                        continue;
-                    }
-
-                    const ChVector3d query_shape_b = shape_b_frame_abs.TransformPointParentToLocal(surface_world_a);
-                    const ChSDFProbeResult probe_b = shape_b.ProbeLocal(query_shape_b);
-                    if (!probe_b.valid || std::abs(probe_b.distance) > max_abs_distance) {
-                        continue;
-                    }
-
-                    const double normal_b_length = probe_b.normal_world.Length();
-                    if (normal_b_length <= 1.0e-12) {
-                        continue;
-                    }
-
-                    const ChVector3d normal_shape_b = probe_b.normal_world / normal_b_length;
-                    const ChVector3d normal_world_a =
-                        shape_a_frame_abs.TransformDirectionLocalToParent(surface_probe_a.normal_world).GetNormalized();
-                    const ChVector3d normal_world_b =
-                        shape_b_frame_abs.TransformDirectionLocalToParent(normal_shape_b).GetNormalized();
-                    const double normal_opposition = -Vdot(normal_world_a, normal_world_b);
-                    if (normal_opposition < settings.min_opposed_normal_cosine) {
-                        continue;
-                    }
-
-                    const ChVector3d surface_shape_b = SurfacePoint(query_shape_b, probe_b, normal_shape_b);
-                    const ChVector3d surface_world_b = shape_b_frame_abs.TransformPointLocalToParent(surface_shape_b);
-                    const ChSDFProbeResult probe_a_on_b =
-                        shape_a.ProbeLocal(shape_a_frame_abs.TransformPointParentToLocal(surface_world_b));
-                    if (!probe_a_on_b.valid) {
-                        continue;
-                    }
-
-                    const double combined_gap = probe_b.distance + probe_a_on_b.distance;
-                    if (settings.max_combined_gap >= 0 && combined_gap > settings.max_combined_gap) {
-                        continue;
-                    }
-
-                    ChVector3d contact_normal_world = normal_world_a - normal_world_b;
-                    const double contact_normal_length = contact_normal_world.Length();
-                    if (contact_normal_length <= 1.0e-12) {
-                        contact_normal_world = normal_world_a;
-                    } else {
-                        contact_normal_world /= contact_normal_length;
-                    }
-
                     const ChVector3i coord(ix, iy, iz);
-                    ChSDFBrickPairRegionSample sample;
-                    sample.brick_a_index = brick_a_index;
-                    sample.brick_b_index = brick_b_index;
-                    sample.coord = coord;
-                    sample.point_world = surface_world_a;
-                    sample.point_shape_a = surface_shape_a;
-                    sample.point_shape_b = query_shape_b;
-                    sample.surface_world_a = surface_world_a;
-                    sample.surface_world_b = surface_world_b;
-                    sample.surface_shape_a = surface_shape_a;
-                    sample.surface_shape_b = surface_shape_b;
-                    sample.normal_world_a = normal_world_a;
-                    sample.normal_world_b = normal_world_b;
-                    sample.contact_normal_world = contact_normal_world;
-                    sample.distance_a = surface_probe_a.distance;
-                    sample.distance_b = probe_b.distance;
-                    sample.combined_gap = combined_gap;
-                    sample.normal_opposition = normal_opposition;
-                    sample.area_weight = EstimateSurfaceAreaWeight(surface_probe_a.normal_world, voxel_size_a);
-                    sample.probe_a = surface_probe_a;
-                    sample.probe_b = probe_b;
+                    const ChVector3d cell_index(ix + 0.5, iy + 0.5, iz + 0.5);
+                    const ChSDFProbeResult probe_cell_a = level_set_a->ProbeIndex(cell_index);
+                    if (!probe_cell_a.valid) {
+                        continue;
+                    }
 
-                    const CoordKey key = MakeCoordKey(coord);
-                    const auto it = sample_lookup.find(key);
-                    if (it == sample_lookup.end()) {
-                        sample_lookup.emplace(key, samples.size());
-                        samples.push_back(sample);
-                    } else {
-                        const std::size_t old_index = it->second;
-                        const double old_score = std::abs(samples[old_index].combined_gap) + std::abs(samples[old_index].distance_b);
-                        const double new_score = std::abs(sample.combined_gap) + std::abs(sample.distance_b);
-                        if (new_score < old_score) {
-                            samples[old_index] = sample;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        ChVector3i neighbor_coord = coord;
+                        if (axis == 0) {
+                            neighbor_coord.x() += 1;
+                        } else if (axis == 1) {
+                            neighbor_coord.y() += 1;
+                        } else {
+                            neighbor_coord.z() += 1;
+                        }
+
+                        const ChVector3d neighbor_index(neighbor_coord.x() + 0.5, neighbor_coord.y() + 0.5,
+                                                        neighbor_coord.z() + 0.5);
+                        const ChSDFProbeResult probe_neighbor_a = level_set_a->ProbeIndex(neighbor_index);
+                        if (!probe_neighbor_a.valid) {
+                            continue;
+                        }
+
+                        if (!HasSurfaceCrossing(probe_cell_a.distance, probe_neighbor_a.distance, near_surface_threshold)) {
+                            continue;
+                        }
+
+                        ChSDFProbeResult surface_probe_a;
+                        if (!FindZeroAlongIndexSegment(*level_set_a, cell_index, neighbor_index, probe_cell_a.distance,
+                                                       probe_neighbor_a.distance, surface_probe_a)) {
+                            continue;
+                        }
+
+                        const ChVector3d normal_shape_a = SafeNormalized(surface_probe_a.normal_world, AxisUnit(axis));
+                        if (DominantAxis(normal_shape_a) != axis) {
+                            continue;
+                        }
+                        const ChVector3d surface_shape_a = surface_probe_a.point_world;
+                        const ChVector3d surface_world_a =
+                            shape_a_frame_abs.TransformPointLocalToParent(surface_shape_a);
+
+                        const ChVector3d query_shape_b = shape_b_frame_abs.TransformPointParentToLocal(surface_world_a);
+                        const ChSDFProbeResult probe_b_at_carrier = shape_b.ProbeLocal(query_shape_b);
+                        if (!probe_b_at_carrier.valid || probe_b_at_carrier.distance > max_abs_distance) {
+                            continue;
+                        }
+
+                        const ChVector3d normal_world_a =
+                            shape_a_frame_abs.TransformDirectionLocalToParent(normal_shape_a).GetNormalized();
+                        const NormalProjectionResult projection = ProjectPointToShapeAlongNormal(
+                            shape_b, shape_b_frame_abs, surface_world_a, normal_world_a, projection_search, projection_step);
+                        if (!projection.valid || std::abs(projection.signed_gap) > projection_search) {
+                            continue;
+                        }
+
+                        const ChSDFProbeResult probe_a_on_b =
+                            shape_a.ProbeLocal(shape_a_frame_abs.TransformPointParentToLocal(projection.projected_world));
+                        if (!probe_a_on_b.valid) {
+                            continue;
+                        }
+
+                        const ChVector3d normal_world_b = shape_b_frame_abs.TransformDirectionLocalToParent(
+                                                               SafeNormalized(projection.projected_probe_b.normal_world, -normal_world_a))
+                                                               .GetNormalized();
+                        const double normal_opposition = -Vdot(normal_world_a, normal_world_b);
+                        if (normal_opposition < settings.min_opposed_normal_cosine) {
+                            continue;
+                        }
+
+                        const double combined_gap = probe_b_at_carrier.distance + probe_a_on_b.distance;
+                        if (settings.max_combined_gap >= 0 && combined_gap > settings.max_combined_gap) {
+                            continue;
+                        }
+
+                        if (item.second.empty()) {
+                            continue;
+                        }
+
+                        ChSDFBrickPairRegionSample sample;
+                        sample.brick_a_index = brick_a_index;
+                        sample.brick_b_index = item.second.front()->brick_b_index;
+                        sample.carrier_axis = axis;
+                        sample.coord = coord;
+                        sample.point_world = surface_world_a;
+                        sample.point_shape_a = surface_shape_a;
+                        sample.point_shape_b = projection.projected_shape_b;
+                        sample.surface_world_a = surface_world_a;
+                        sample.surface_world_b = projection.projected_world;
+                        sample.surface_shape_a = surface_shape_a;
+                        sample.surface_shape_b = projection.projected_shape_b;
+                        sample.normal_world_a = normal_world_a;
+                        sample.normal_world_b = normal_world_b;
+                        sample.contact_normal_world = normal_world_a;
+                        sample.distance_a = 0.0;
+                        sample.distance_b = probe_b_at_carrier.distance;
+                        sample.normal_gap = projection.signed_gap;
+                        sample.combined_gap = combined_gap;
+                        sample.normal_opposition = normal_opposition;
+                        sample.area_weight =
+                            FaceAreaForAxis(axis, voxel_size_a) / std::max(std::abs(Vdot(normal_shape_a, AxisUnit(axis))), 1.0e-12);
+                        sample.probe_a = surface_probe_a;
+                        sample.probe_b = projection.projected_probe_b;
+
+                        const CarrierKey key = MakeCarrierKey(axis, surface_probe_a.point_index);
+                        const auto it = sample_lookup.find(key);
+                        if (it == sample_lookup.end()) {
+                            sample_lookup.emplace(key, samples.size());
+                            samples.push_back(sample);
+                        } else {
+                            const std::size_t old_index = it->second;
+                            const double old_score =
+                                std::abs(samples[old_index].normal_gap) + std::abs(samples[old_index].combined_gap);
+                            const double new_score = std::abs(sample.normal_gap) + std::abs(sample.combined_gap);
+                            if (new_score < old_score) {
+                                samples[old_index] = sample;
+                            }
                         }
                     }
                 }
@@ -887,8 +1152,32 @@ std::vector<ChSDFBrickPairRegion> ChSDFContactRegionBuilder::BuildBrickPairRegio
             }
         }
 
+        FilterBrickPairRegionByDominantNormal(region, settings.min_region_normal_cosine);
         if (region.samples.size() < settings.min_region_samples) {
             continue;
+        }
+
+        region.world_bounds = ChAABB();
+        region.patch_bounds = ChAABB();
+        region.shape_a_bounds = ChAABB();
+        region.shape_b_bounds = ChAABB();
+        region.centroid_world = VNULL;
+        region.centroid_shape_a = VNULL;
+        region.centroid_shape_b = VNULL;
+        region.mean_normal_world = VNULL;
+        brick_flags_a.clear();
+        brick_flags_b.clear();
+
+        for (const auto& sample : region.samples) {
+            region.world_bounds += sample.point_world;
+            region.shape_a_bounds += sample.surface_shape_a;
+            region.shape_b_bounds += sample.surface_shape_b;
+            region.centroid_world += sample.point_world;
+            region.centroid_shape_a += sample.surface_shape_a;
+            region.centroid_shape_b += sample.surface_shape_b;
+            region.mean_normal_world += sample.contact_normal_world;
+            brick_flags_a[sample.brick_a_index] = 1;
+            brick_flags_b[sample.brick_b_index] = 1;
         }
 
         region.brick_a_indices.reserve(brick_flags_a.size());

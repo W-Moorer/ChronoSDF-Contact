@@ -680,32 +680,23 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
         return result;
     }
 
-    const double du = region.sample_spacing > 0
-                          ? region.sample_spacing
-                          : GridStep(region.suggested_patch_settings.samples_u, region.suggested_patch_settings.half_length_u);
-    const double dv = region.sample_spacing > 0
-                          ? region.sample_spacing
-                          : GridStep(region.suggested_patch_settings.samples_v, region.suggested_patch_settings.half_length_v);
-    const double resolution_length =
-        region.sample_spacing > 0 ? region.sample_spacing : 0.5 * (std::abs(du) + std::abs(dv));
-    const auto surface_selection = SelectSurfacePatchSamples(region, du, dv);
-    const auto curvature_proxies = EstimateSurfaceRegionCurvatureProxies(surface_selection, du, dv);
-    const auto area_weights = EstimateSurfaceAreaWeights(surface_selection, du, dv);
+    const double resolution_length = region.sample_spacing > 0 ? region.sample_spacing : 1.0e-3;
+    const std::vector<double> curvature_proxies(region.samples.size(), 0.0);
 
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
     double local_stiffness_area_sum = 0;
     double effective_mass_area_sum = 0;
 
-    result.samples.reserve(surface_selection.samples.size());
+    result.samples.reserve(region.samples.size());
 
-    for (std::size_t sample_index = 0; sample_index < surface_selection.samples.size(); ++sample_index) {
-        const auto& region_sample = *surface_selection.samples[sample_index].sample;
+    for (std::size_t sample_index = 0; sample_index < region.samples.size(); ++sample_index) {
+        const auto& region_sample = region.samples[sample_index];
         ChSDFBrickPairWrenchSample sample;
         sample.region_sample = region_sample;
         sample.point_patch = region_sample.point_patch;
-        sample.quadrature_area = std::max(area_weights[sample_index], 0.0);
-        sample.signed_gap = 0.5 * region_sample.combined_gap - pressure_settings.distance_offset;
+        sample.quadrature_area = std::max(region_sample.area_weight, 0.0);
+        sample.signed_gap = region_sample.normal_gap - pressure_settings.distance_offset;
         sample.penetration = std::max(-sample.signed_gap, 0.0);
         result.patch_area += sample.quadrature_area;
 

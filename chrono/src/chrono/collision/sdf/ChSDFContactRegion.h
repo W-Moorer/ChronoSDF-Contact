@@ -73,6 +73,7 @@ struct ChApi ChSDFBrickPairRegionSample {
     std::size_t brick_a_index = 0;
     std::size_t brick_b_index = 0;
 
+    int carrier_axis = -1;
     ChVector3i coord = ChVector3i(0, 0, 0);
 
     ChVector3d point_world = VNULL;
@@ -91,6 +92,7 @@ struct ChApi ChSDFBrickPairRegionSample {
 
     double distance_a = 0;
     double distance_b = 0;
+    double normal_gap = 0;
     double combined_gap = 0;
     double normal_opposition = 0;
     double area_weight = 0;
@@ -150,6 +152,7 @@ class ChApi ChSDFContactRegionBuilder {
         double min_abs_normal_alignment = 0;
         double min_opposed_normal_cosine = 0;
         double min_neighbor_normal_cosine = 0.9;
+        double min_region_normal_cosine = 0.9;
 
         std::size_t min_region_samples = 1;
         int neighbor_mode = 6;
