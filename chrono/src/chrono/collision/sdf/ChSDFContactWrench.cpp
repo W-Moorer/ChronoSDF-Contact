@@ -432,6 +432,71 @@ std::vector<double> EstimateSurfaceRegionCurvatureProxies(const SurfacePatchSele
     return curvature;
 }
 
+std::vector<double> EstimateSurfaceAreaWeights(const SurfacePatchSelection& selection,
+                                               double du,
+                                               double dv) {
+    std::vector<double> area_weights(selection.samples.size(), 0.0);
+    if (selection.samples.empty()) {
+        return area_weights;
+    }
+
+    const double safe_du = std::abs(du) > 1.0e-12 ? std::abs(du) : 1.0;
+    const double safe_dv = std::abs(dv) > 1.0e-12 ? std::abs(dv) : 1.0;
+
+    std::unordered_map<CoordKey2, std::size_t, CoordKey2Hasher> lookup;
+    lookup.reserve(selection.samples.size());
+    for (std::size_t i = 0; i < selection.samples.size(); ++i) {
+        lookup.emplace(selection.samples[i].key, i);
+    }
+
+    auto axis_width = [&lookup, &selection](const SurfacePatchSample& sample,
+                                            int du_offset_a,
+                                            int dv_offset_a,
+                                            int du_offset_b,
+                                            int dv_offset_b,
+                                            bool use_u,
+                                            double fallback) -> double {
+        const CoordKey2 key_a{sample.key.u + du_offset_a, sample.key.v + dv_offset_a};
+        const CoordKey2 key_b{sample.key.u + du_offset_b, sample.key.v + dv_offset_b};
+
+        const auto it_a = lookup.find(key_a);
+        const auto it_b = lookup.find(key_b);
+
+        const double coord = use_u ? sample.sample->point_patch.x() : sample.sample->point_patch.y();
+        const double coord_a =
+            it_a != lookup.end()
+                ? (use_u ? selection.samples[it_a->second].sample->point_patch.x()
+                         : selection.samples[it_a->second].sample->point_patch.y())
+                : coord - fallback;
+        const double coord_b =
+            it_b != lookup.end()
+                ? (use_u ? selection.samples[it_b->second].sample->point_patch.x()
+                         : selection.samples[it_b->second].sample->point_patch.y())
+                : coord + fallback;
+
+        if (it_a != lookup.end() && it_b != lookup.end()) {
+            return 0.5 * std::abs(coord_b - coord_a);
+        }
+        if (it_a != lookup.end()) {
+            return std::abs(coord - coord_a);
+        }
+        if (it_b != lookup.end()) {
+            return std::abs(coord_b - coord);
+        }
+
+        return fallback;
+    };
+
+    for (std::size_t i = 0; i < selection.samples.size(); ++i) {
+        const auto& sample = selection.samples[i];
+        const double width_u = axis_width(sample, -1, 0, 1, 0, true, safe_du);
+        const double width_v = axis_width(sample, 0, -1, 0, 1, false, safe_dv);
+        area_weights[i] = std::max(width_u * width_v, 0.0);
+    }
+
+    return area_weights;
+}
+
 }  // namespace
 
 ChSDFEffectiveMassProperties ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(ChBody* body) {
@@ -610,20 +675,22 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     ChSDFBrickPairWrenchResult result;
     result.region = region;
     result.total_samples = region.samples.size();
-    result.patch_area = 4.0 * region.suggested_patch_settings.half_length_u * region.suggested_patch_settings.half_length_v;
 
     if (region.samples.empty()) {
         return result;
     }
 
-    const double du = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_u,
-                                                                                   region.suggested_patch_settings.half_length_u);
-    const double dv = region.sample_spacing > 0 ? region.sample_spacing : GridStep(region.suggested_patch_settings.samples_v,
-                                                                                   region.suggested_patch_settings.half_length_v);
-    const double quadrature_area = std::abs(du * dv);
-    const double resolution_length = region.sample_spacing > 0 ? region.sample_spacing : 0.5 * (std::abs(du) + std::abs(dv));
+    const double du = region.sample_spacing > 0
+                          ? region.sample_spacing
+                          : GridStep(region.suggested_patch_settings.samples_u, region.suggested_patch_settings.half_length_u);
+    const double dv = region.sample_spacing > 0
+                          ? region.sample_spacing
+                          : GridStep(region.suggested_patch_settings.samples_v, region.suggested_patch_settings.half_length_v);
+    const double resolution_length =
+        region.sample_spacing > 0 ? region.sample_spacing : 0.5 * (std::abs(du) + std::abs(dv));
     const auto surface_selection = SelectSurfacePatchSamples(region, du, dv);
     const auto curvature_proxies = EstimateSurfaceRegionCurvatureProxies(surface_selection, du, dv);
+    const auto area_weights = EstimateSurfaceAreaWeights(surface_selection, du, dv);
 
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
@@ -633,24 +700,14 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     result.samples.reserve(surface_selection.samples.size());
 
     for (std::size_t sample_index = 0; sample_index < surface_selection.samples.size(); ++sample_index) {
-        const auto& surface_sample = surface_selection.samples[sample_index];
-        const auto& region_sample = *surface_sample.sample;
+        const auto& region_sample = *surface_selection.samples[sample_index].sample;
         ChSDFBrickPairWrenchSample sample;
         sample.region_sample = region_sample;
         sample.point_patch = region_sample.point_patch;
-        const std::size_t count_u = surface_selection.max_u >= surface_selection.min_u
-                                        ? static_cast<std::size_t>(surface_selection.max_u - surface_selection.min_u + 1)
-                                        : 1;
-        const std::size_t count_v = surface_selection.max_v >= surface_selection.min_v
-                                        ? static_cast<std::size_t>(surface_selection.max_v - surface_selection.min_v + 1)
-                                        : 1;
-        const std::size_t index_u = static_cast<std::size_t>(surface_sample.key.u - surface_selection.min_u);
-        const std::size_t index_v = static_cast<std::size_t>(surface_sample.key.v - surface_selection.min_v);
-        sample.quadrature_area =
-            quadrature_area * TrapezoidWeight(index_u, count_u) * TrapezoidWeight(index_v, count_v);
-
-        sample.signed_gap = region_sample.combined_gap - pressure_settings.distance_offset;
+        sample.quadrature_area = std::max(area_weights[sample_index], 0.0);
+        sample.signed_gap = 0.5 * region_sample.combined_gap - pressure_settings.distance_offset;
         sample.penetration = std::max(-sample.signed_gap, 0.0);
+        result.patch_area += sample.quadrature_area;
 
         const ChVector3d speed_world_a = shape_a_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_a);
         const ChVector3d speed_world_b = shape_b_frame_abs.PointSpeedLocalToParent(region_sample.surface_shape_b);

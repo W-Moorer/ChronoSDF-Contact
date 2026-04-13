@@ -68,7 +68,7 @@ struct ChApi ChSDFContactRegion {
     bool HasSamples() const { return !samples.empty(); }
 };
 
-/// One dual-SDF sample extracted from a coarse brick pair overlap.
+/// One dual-SDF surface sample extracted from a coarse brick-pair candidate.
 struct ChApi ChSDFBrickPairRegionSample {
     std::size_t brick_a_index = 0;
     std::size_t brick_b_index = 0;
@@ -93,6 +93,7 @@ struct ChApi ChSDFBrickPairRegionSample {
     double distance_b = 0;
     double combined_gap = 0;
     double normal_opposition = 0;
+    double area_weight = 0;
 
     ChSDFProbeResult probe_a;
     ChSDFProbeResult probe_b;
