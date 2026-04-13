@@ -81,6 +81,11 @@ ChSDFProbeResult ChCollisionShapeSDF::ProbeLocal(const ChVector3d& point_local) 
     return m_level_set->ProbeWorld(point_local);
 }
 
+ChSDFPotentialFieldProbe ChCollisionShapeSDF::ProbePotentialLocal(const ChVector3d& point_local) const {
+    const ChSDFProbeResult sdf_probe = ProbeLocal(point_local);
+    return ChSDFPotentialFieldEvaluator::Evaluate(sdf_probe, GetGridInfo(), m_potential_field_settings);
+}
+
 ChSDFContactPatch ChCollisionShapeSDF::SamplePatchLocal(
     const ChFrame<>& patch_frame_local,
     const ChSDFContactPatchSampler::Settings& settings) const {
@@ -101,13 +106,42 @@ void ChCollisionShapeSDF::ArchiveOut(ChArchiveOut& archive_out) {
     ChCollisionShape::ArchiveOut(archive_out);
     archive_out << CHNVP(m_level_set_filename);
     archive_out << CHNVP(m_grid_name);
+    const double potential_field_modulus = m_potential_field_settings.modulus;
+    const double potential_field_depth_scale = m_potential_field_settings.depth_scale;
+    const double potential_field_depth_cap = m_potential_field_settings.depth_cap;
+    const double potential_field_support_margin = m_potential_field_settings.support_margin;
+    const bool potential_field_clamp_outside_to_zero = m_potential_field_settings.clamp_outside_to_zero;
+    archive_out << CHNVP(potential_field_modulus);
+    archive_out << CHNVP(potential_field_depth_scale);
+    archive_out << CHNVP(potential_field_depth_cap);
+    archive_out << CHNVP(potential_field_support_margin);
+    archive_out << CHNVP(potential_field_clamp_outside_to_zero);
 }
 
 void ChCollisionShapeSDF::ArchiveIn(ChArchiveIn& archive_in) {
-    /*int version =*/archive_in.VersionRead<ChCollisionShapeSDF>();
+    int version = archive_in.VersionRead<ChCollisionShapeSDF>();
     ChCollisionShape::ArchiveIn(archive_in);
     archive_in >> CHNVP(m_level_set_filename);
     archive_in >> CHNVP(m_grid_name);
+    if (version >= 1) {
+        double potential_field_modulus = m_potential_field_settings.modulus;
+        double potential_field_depth_scale = m_potential_field_settings.depth_scale;
+        double potential_field_depth_cap = m_potential_field_settings.depth_cap;
+        double potential_field_support_margin = m_potential_field_settings.support_margin;
+        bool potential_field_clamp_outside_to_zero = m_potential_field_settings.clamp_outside_to_zero;
+        archive_in >> CHNVP(potential_field_modulus);
+        archive_in >> CHNVP(potential_field_depth_scale);
+        archive_in >> CHNVP(potential_field_depth_cap);
+        archive_in >> CHNVP(potential_field_support_margin);
+        archive_in >> CHNVP(potential_field_clamp_outside_to_zero);
+        m_potential_field_settings.modulus = potential_field_modulus;
+        m_potential_field_settings.depth_scale = potential_field_depth_scale;
+        m_potential_field_settings.depth_cap = potential_field_depth_cap;
+        m_potential_field_settings.support_margin = potential_field_support_margin;
+        m_potential_field_settings.clamp_outside_to_zero = potential_field_clamp_outside_to_zero;
+    } else {
+        m_potential_field_settings = ChSDFPotentialFieldSettings();
+    }
 
     m_last_error.clear();
     m_level_set.reset();

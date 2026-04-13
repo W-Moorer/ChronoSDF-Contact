@@ -18,6 +18,7 @@
 
 #include "chrono/collision/ChCollisionShape.h"
 #include "chrono/collision/sdf/ChSDFContactPatch.h"
+#include "chrono/collision/sdf/ChSDFPotentialField.h"
 
 namespace chrono {
 
@@ -69,6 +70,13 @@ class ChApi ChCollisionShapeSDF : public ChCollisionShape {
     /// Probe the SDF using coordinates expressed in the local frame of this shape.
     ChSDFProbeResult ProbeLocal(const ChVector3d& point_local) const;
 
+    /// Configure the shape-fixed potential pressure field derived from the local SDF depth.
+    void SetPotentialFieldSettings(const ChSDFPotentialFieldSettings& settings) { m_potential_field_settings = settings; }
+    const ChSDFPotentialFieldSettings& GetPotentialFieldSettings() const { return m_potential_field_settings; }
+
+    /// Probe the shape-fixed potential pressure field using coordinates expressed in the local frame of this shape.
+    ChSDFPotentialFieldProbe ProbePotentialLocal(const ChVector3d& point_local) const;
+
     /// Sample a local patch frame against the SDF carried by this shape.
     ChSDFContactPatch SamplePatchLocal(const ChFrame<>& patch_frame_local,
                                        const ChSDFContactPatchSampler::Settings& settings) const;
@@ -90,9 +98,12 @@ class ChApi ChCollisionShapeSDF : public ChCollisionShape {
     std::string m_level_set_filename;
     std::string m_grid_name;
     std::string m_last_error;
+    ChSDFPotentialFieldSettings m_potential_field_settings;
 };
 
 /// @} chrono_collision
+
+CH_CLASS_VERSION(ChCollisionShapeSDF, 1)
 
 }  // end namespace chrono
 
