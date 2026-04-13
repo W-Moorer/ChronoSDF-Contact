@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "chrono/collision/sdf/ChSDFBrickPair.h"
+#include "chrono/collision/sdf/ChSDFContactSurface.h"
 #include "chrono/collision/sdf/ChSDFContactWrench.h"
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
 #include "chrono/physics/ChBody.h"
@@ -99,6 +100,12 @@ class ChApi ChSDFShapePair {
     /// Build connected dual-SDF contact regions from the retained brick pairs.
     std::vector<ChSDFBrickPairRegion> BuildContactRegions(const ChSDFBrickPairBroadphase::Settings& pair_settings,
                                                           const ChSDFContactRegionBuilder::Settings& region_settings) const;
+
+    /// Build B-side local charts and clipped support cells from the retained brick pairs.
+    std::vector<ChSDFContactSurfaceRegion> BuildContactSurfaces(
+        const ChSDFBrickPairBroadphase::Settings& pair_settings,
+        const ChSDFContactRegionBuilder::Settings& region_settings,
+        const ChSDFRegionChartSettings& chart_settings) const;
 
     /// Build connected dual-SDF contact regions and evaluate the resulting distributed contact wrenches.
     ChSDFShapePairContactResult EvaluateContact(const ChSDFBrickPairBroadphase::Settings& pair_settings,

@@ -169,6 +169,19 @@ std::vector<ChSDFBrickPairRegion> ChSDFShapePair::BuildContactRegions(
                                                             GetShapeBFrameAbs(), brick_pairs, region_settings);
 }
 
+std::vector<ChSDFContactSurfaceRegion> ChSDFShapePair::BuildContactSurfaces(
+    const ChSDFBrickPairBroadphase::Settings& pair_settings,
+    const ChSDFContactRegionBuilder::Settings& region_settings,
+    const ChSDFRegionChartSettings& chart_settings) const {
+    if (!IsReady()) {
+        return {};
+    }
+
+    const auto regions = BuildContactRegions(pair_settings, region_settings);
+    return ChSDFContactSurfaceBuilder::BuildRegionSurfaces(*m_shape_a, GetShapeAFrameAbs(), *m_shape_b,
+                                                           GetShapeBFrameAbs(), regions, chart_settings);
+}
+
 ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
     const ChSDFBrickPairBroadphase::Settings& pair_settings,
     const ChSDFContactRegionBuilder::Settings& region_settings,
