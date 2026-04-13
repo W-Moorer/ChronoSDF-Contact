@@ -158,6 +158,11 @@ ChVector3d ComputeTangentialTraction(const ChVector3d& tangential_velocity,
     return speed > 1.0e-12 ? tangential_velocity * (-settings.friction_coefficient * pressure / speed) : VNULL;
 }
 
+ChVector3d SafeNormalized(const ChVector3d& v, const ChVector3d& fallback = VECT_Z) {
+    const double length = v.Length();
+    return length > 1.0e-12 ? v / length : fallback;
+}
+
 ChVector3d TransformPotentialGradientWorld(const ChFrameMoving<>& shape_frame_abs,
                                            const ChSDFPotentialFieldProbe& probe) {
     return shape_frame_abs.TransformDirectionLocalToParent(probe.grad_p0_local);
@@ -379,48 +384,207 @@ ChSDFShapePairContactResult ChSDFVolumeContactEvaluator::EvaluateBrickPairs(
     std::vector<ActiveVoxelContribution> active_samples;
     active_samples.reserve(cells.size());
 
+    const double gauss_coord = 1.0 / std::sqrt(3.0);
+    const double subcell_weight = cell_volume / 8.0;
+    const double offset_scale = 0.5 * spacing * gauss_coord;
+
     for (const auto& item : cells) {
         const GridCellCandidate& cell = item.second;
-        const ChVector3d point_shape_a = shape_a_frame_abs.TransformPointParentToLocal(cell.center_world);
-        const ChVector3d point_shape_b = shape_b_frame_abs.TransformPointParentToLocal(cell.center_world);
-        const ChSDFPotentialFieldProbe probe_a = shape_a.ProbePotentialLocal(point_shape_a);
-        const ChSDFPotentialFieldProbe probe_b = shape_b.ProbePotentialLocal(point_shape_b);
 
-        if (!probe_a.valid || !probe_b.valid || probe_a.phi > 0 || probe_b.phi > 0) {
+        double area_sum = 0;
+        double integrated_pressure_sum = 0;
+        double local_stiffness_area_sum = 0;
+        double effective_mass_area_sum = 0;
+        double normal_speed_area_sum = 0;
+        double tangential_speed_area_sum = 0;
+        double gradient_quality_area_sum = 0;
+        double normal_gap_area_sum = 0;
+        double combined_gap_area_sum = 0;
+        double distance_a_area_sum = 0;
+        double distance_b_area_sum = 0;
+        double p0_a_area_sum = 0;
+        double p0_b_area_sum = 0;
+        double support_overlap_area_sum = 0;
+        double stiffness_scale_area_sum = 0;
+        double local_damping_area_sum = 0;
+        double normal_opposition_area_sum = 0;
+        double penetration_max = 0;
+        double pressure_max = 0;
+        ChVector3d area_centroid_sum = VNULL;
+        ChVector3d pressure_centroid_sum = VNULL;
+        ChVector3d normal_area_sum = VNULL;
+        ChVector3d tangential_velocity_area_sum = VNULL;
+        ChVector3d tangential_traction_area_sum = VNULL;
+        ChVector3d tangential_force_sum = VNULL;
+        ChVector3d force_world_b_sum = VNULL;
+        ChVector3d torque_world_a_sum = VNULL;
+        ChVector3d torque_world_b_sum = VNULL;
+        ChSDFPotentialFieldProbe rep_probe_a;
+        ChSDFPotentialFieldProbe rep_probe_b;
+        bool have_rep_probe = false;
+
+        for (int sz = -1; sz <= 1; sz += 2) {
+            for (int sy = -1; sy <= 1; sy += 2) {
+                for (int sx = -1; sx <= 1; sx += 2) {
+                    const ChVector3d quadrature_point_world =
+                        cell.center_world + ChVector3d(sx * offset_scale, sy * offset_scale, sz * offset_scale);
+                    const ChVector3d quadrature_point_shape_a =
+                        shape_a_frame_abs.TransformPointParentToLocal(quadrature_point_world);
+                    const ChVector3d quadrature_point_shape_b =
+                        shape_b_frame_abs.TransformPointParentToLocal(quadrature_point_world);
+
+                    const ChSDFPotentialFieldProbe probe_a = shape_a.ProbePotentialLocal(quadrature_point_shape_a);
+                    const ChSDFPotentialFieldProbe probe_b = shape_b.ProbePotentialLocal(quadrature_point_shape_b);
+
+                    if (!probe_a.valid || !probe_b.valid || probe_a.phi > 0 || probe_b.phi > 0) {
+                        continue;
+                    }
+
+                    const double p_a = probe_a.p0;
+                    const double p_b = probe_b.p0;
+                    const double h_value = p_a - p_b;
+
+                    const ChVector3d grad_p_a_world = TransformPotentialGradientWorld(shape_a_frame_abs, probe_a);
+                    const ChVector3d grad_p_b_world = TransformPotentialGradientWorld(shape_b_frame_abs, probe_b);
+                    const ChVector3d grad_h_world = grad_p_a_world - grad_p_b_world;
+                    const double grad_h_norm = grad_h_world.Length();
+                    if (grad_h_norm <= 1.0e-12) {
+                        continue;
+                    }
+
+                    const double eta_h = ResolvePressureBandWidth(grad_h_norm, spacing);
+                    const double measure_weight = RegularizedDelta(h_value, eta_h) * grad_h_norm * subcell_weight;
+                    if (measure_weight <= 1.0e-16) {
+                        continue;
+                    }
+
+                    const ChVector3d normal_world = -(grad_h_world / grad_h_norm);
+                    const ChVector3d contact_point_world =
+                        quadrature_point_world - grad_h_world * (h_value / (grad_h_norm * grad_h_norm));
+                    const ChVector3d contact_point_shape_a =
+                        shape_a_frame_abs.TransformPointParentToLocal(contact_point_world);
+                    const ChVector3d contact_point_shape_b =
+                        shape_b_frame_abs.TransformPointParentToLocal(contact_point_world);
+
+                    const ChVector3d speed_world_a = shape_a_frame_abs.PointSpeedLocalToParent(contact_point_shape_a);
+                    const ChVector3d speed_world_b = shape_b_frame_abs.PointSpeedLocalToParent(contact_point_shape_b);
+                    const ChVector3d relative_speed_world = speed_world_b - speed_world_a;
+                    const double normal_velocity_component = Vdot(relative_speed_world, normal_world);
+                    const double normal_speed = -normal_velocity_component;
+                    const ChVector3d tangential_velocity_world =
+                        relative_speed_world - normal_world * normal_velocity_component;
+                    const double tangential_speed = tangential_velocity_world.Length();
+                    const double gradient_quality = 0.5 * (GradientQuality(probe_a) + GradientQuality(probe_b));
+                    const double stiffness_scale =
+                        LocalStiffnessScale(gradient_quality, 0.0, spacing, pressure_settings);
+                    const double effective_mass = ClampEffectiveMass(
+                        ChSDFContactWrenchEvaluator::EstimateEffectiveMass(body_a, body_b, contact_point_world,
+                                                                           normal_world,
+                                                                           pressure_settings.fallback_effective_mass),
+                        pressure_settings);
+                    const double local_stiffness = grad_h_norm * stiffness_scale;
+                    double local_damping = pressure_settings.damping * local_stiffness;
+
+                    const double base_pressure = 0.5 * (p_a + p_b) * stiffness_scale;
+                    const double damping_speed =
+                        pressure_settings.use_only_closing_speed ? std::max(normal_speed, 0.0) : normal_speed;
+                    double pressure = base_pressure;
+                    if (pressure_settings.damping_ratio >= 0) {
+                        local_damping = 2.0 * pressure_settings.damping_ratio *
+                                        std::sqrt(std::max(local_stiffness, 0.0) * std::max(effective_mass, 0.0));
+                        pressure += local_damping * damping_speed;
+                    } else {
+                        pressure *= (1.0 + pressure_settings.damping * damping_speed);
+                    }
+                    pressure = ClampPressure(pressure + pressure_settings.adhesion_pressure, pressure_settings);
+                    if (pressure <= 0) {
+                        continue;
+                    }
+
+                    const double penetration =
+                        local_stiffness > 1.0e-12 ? std::max(base_pressure / local_stiffness, 0.0) : 0.0;
+                    const ChVector3d tangential_traction_world =
+                        ComputeTangentialTraction(tangential_velocity_world, pressure, pressure_settings);
+                    const ChVector3d normal_force_world_b = normal_world * (pressure * measure_weight);
+                    const ChVector3d tangential_force_world_b = tangential_traction_world * measure_weight;
+                    const ChVector3d force_world_b = normal_force_world_b + tangential_force_world_b;
+                    const ChVector3d force_world_a = -force_world_b;
+
+                    area_sum += measure_weight;
+                    integrated_pressure_sum += pressure * measure_weight;
+                    local_stiffness_area_sum += local_stiffness * measure_weight;
+                    effective_mass_area_sum += effective_mass * measure_weight;
+                    normal_speed_area_sum += normal_speed * measure_weight;
+                    tangential_speed_area_sum += tangential_speed * measure_weight;
+                    gradient_quality_area_sum += gradient_quality * measure_weight;
+                    normal_gap_area_sum += (-h_value / grad_h_norm) * measure_weight;
+                    combined_gap_area_sum += (probe_a.phi + probe_b.phi) * measure_weight;
+                    distance_a_area_sum += probe_a.phi * measure_weight;
+                    distance_b_area_sum += probe_b.phi * measure_weight;
+                    p0_a_area_sum += p_a * measure_weight;
+                    p0_b_area_sum += p_b * measure_weight;
+                    support_overlap_area_sum += (2.0 * eta_h / grad_h_norm) * measure_weight;
+                    stiffness_scale_area_sum += stiffness_scale * measure_weight;
+                    local_damping_area_sum += local_damping * measure_weight;
+                    normal_opposition_area_sum +=
+                        (-Vdot(shape_a_frame_abs.TransformDirectionLocalToParent(probe_a.normal_local),
+                               shape_b_frame_abs.TransformDirectionLocalToParent(probe_b.normal_local))) *
+                        measure_weight;
+                    area_centroid_sum += contact_point_world * measure_weight;
+                    pressure_centroid_sum += contact_point_world * (pressure * measure_weight);
+                    normal_area_sum += normal_world * measure_weight;
+                    tangential_velocity_area_sum += tangential_velocity_world * measure_weight;
+                    tangential_traction_area_sum += tangential_traction_world * measure_weight;
+                    tangential_force_sum += tangential_force_world_b;
+                    force_world_b_sum += force_world_b;
+                    torque_world_a_sum += Vcross(contact_point_world - shape_a_frame_abs.GetPos(), force_world_a);
+                    torque_world_b_sum += Vcross(contact_point_world - shape_b_frame_abs.GetPos(), force_world_b);
+                    penetration_max = std::max(penetration_max, penetration);
+                    pressure_max = std::max(pressure_max, pressure);
+
+                    if (!have_rep_probe) {
+                        rep_probe_a = probe_a;
+                        rep_probe_b = probe_b;
+                        have_rep_probe = true;
+                    }
+                }
+            }
+        }
+
+        if (area_sum <= 1.0e-16 || integrated_pressure_sum <= 1.0e-16) {
             continue;
         }
 
-        const double p_a = probe_a.p0;
-        const double p_b = probe_b.p0;
-        const double h_value = p_a - p_b;
-
-        const ChVector3d grad_p_a_world = TransformPotentialGradientWorld(shape_a_frame_abs, probe_a);
-        const ChVector3d grad_p_b_world = TransformPotentialGradientWorld(shape_b_frame_abs, probe_b);
-        const ChVector3d grad_h_world = grad_p_a_world - grad_p_b_world;
-        const double grad_h_norm = grad_h_world.Length();
-        if (grad_h_norm <= 1.0e-12) {
-            continue;
-        }
-
-        const double eta_h = ResolvePressureBandWidth(grad_h_norm, spacing);
-        if (std::abs(h_value) > eta_h) {
-            continue;
-        }
-
-        const double area_weight = RegularizedDelta(h_value, eta_h) * grad_h_norm * cell_volume;
-        if (area_weight <= 1.0e-16) {
-            continue;
-        }
-
-        const ChVector3d normal_world = -(grad_h_world / grad_h_norm);
-        const ChVector3d point_world = cell.center_world - grad_h_world * (h_value / (grad_h_norm * grad_h_norm));
-        const ChVector3d point_surface_a = shape_a_frame_abs.TransformPointParentToLocal(point_world);
-        const ChVector3d point_surface_b = shape_b_frame_abs.TransformPointParentToLocal(point_world);
+        const ChVector3d point_world = area_centroid_sum / area_sum;
+        const ChVector3d pressure_centroid_world = pressure_centroid_sum / integrated_pressure_sum;
+        const ChVector3d normal_world = SafeNormalized(normal_area_sum);
+        const ChVector3d point_shape_a = shape_a_frame_abs.TransformPointParentToLocal(point_world);
+        const ChVector3d point_shape_b = shape_b_frame_abs.TransformPointParentToLocal(point_world);
 
         ChSDFBrickPairWrenchSample sample;
         sample.active = true;
-        sample.quadrature_area = area_weight;
+        sample.quadrature_area = area_sum;
         sample.point_patch = VNULL;
+        sample.normal_speed = normal_speed_area_sum / area_sum;
+        sample.tangential_speed = tangential_speed_area_sum / area_sum;
+        sample.gradient_quality = gradient_quality_area_sum / area_sum;
+        sample.curvature_proxy = 0.0;
+        sample.resolution_length = spacing;
+        sample.stiffness_scale = stiffness_scale_area_sum / area_sum;
+        sample.effective_mass = effective_mass_area_sum / area_sum;
+        sample.local_stiffness = local_stiffness_area_sum / area_sum;
+        sample.local_damping = local_damping_area_sum / area_sum;
+        sample.pressure = integrated_pressure_sum / area_sum;
+        sample.penetration = penetration_max;
+        sample.signed_gap = -penetration_max;
+        sample.tangential_velocity_world = tangential_velocity_area_sum / area_sum;
+        sample.traction_world = tangential_traction_area_sum / area_sum;
+        sample.force_world = force_world_b_sum;
+        sample.force_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(-force_world_b_sum);
+        sample.torque_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(torque_world_a_sum);
+        sample.force_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(force_world_b_sum);
+        sample.torque_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(torque_world_b_sum);
+
         sample.region_sample.brick_a_index = cell.brick_a_index;
         sample.region_sample.brick_b_index = cell.brick_b_index;
         sample.region_sample.coord = ChVector3i(cell.coord.x, cell.coord.y, cell.coord.z);
@@ -429,85 +593,32 @@ ChSDFShapePairContactResult ChSDFVolumeContactEvaluator::EvaluateBrickPairs(
         sample.region_sample.point_shape_b = point_shape_b;
         sample.region_sample.surface_world_a = point_world;
         sample.region_sample.surface_world_b = point_world;
-        sample.region_sample.surface_shape_a = point_surface_a;
-        sample.region_sample.surface_shape_b = point_surface_b;
-        sample.region_sample.normal_world_a = shape_a_frame_abs.TransformDirectionLocalToParent(probe_a.normal_local);
-        sample.region_sample.normal_world_b = shape_b_frame_abs.TransformDirectionLocalToParent(probe_b.normal_local);
+        sample.region_sample.surface_shape_a = point_shape_a;
+        sample.region_sample.surface_shape_b = point_shape_b;
+        sample.region_sample.normal_world_a =
+            have_rep_probe ? shape_a_frame_abs.TransformDirectionLocalToParent(rep_probe_a.normal_local) : normal_world;
+        sample.region_sample.normal_world_b =
+            have_rep_probe ? shape_b_frame_abs.TransformDirectionLocalToParent(rep_probe_b.normal_local) : -normal_world;
         sample.region_sample.contact_normal_world = normal_world;
-        sample.region_sample.distance_a = probe_a.phi;
-        sample.region_sample.distance_b = probe_b.phi;
-        sample.region_sample.normal_gap = -h_value / grad_h_norm;
-        sample.region_sample.combined_gap = probe_a.phi + probe_b.phi;
-        sample.region_sample.normal_opposition =
-            -Vdot(sample.region_sample.normal_world_a, sample.region_sample.normal_world_b);
-        sample.region_sample.area_weight = area_weight;
+        sample.region_sample.distance_a = distance_a_area_sum / area_sum;
+        sample.region_sample.distance_b = distance_b_area_sum / area_sum;
+        sample.region_sample.normal_gap = normal_gap_area_sum / area_sum;
+        sample.region_sample.combined_gap = combined_gap_area_sum / area_sum;
+        sample.region_sample.normal_opposition = normal_opposition_area_sum / area_sum;
+        sample.region_sample.area_weight = area_sum;
 
-        sample.quadrature_point.point_world = point_world;
-        sample.quadrature_point.point_shape_a = point_surface_a;
-        sample.quadrature_point.point_shape_b = point_surface_b;
+        sample.quadrature_point.point_world = pressure_centroid_world;
+        sample.quadrature_point.point_shape_a = shape_a_frame_abs.TransformPointParentToLocal(pressure_centroid_world);
+        sample.quadrature_point.point_shape_b = shape_b_frame_abs.TransformPointParentToLocal(pressure_centroid_world);
         sample.quadrature_point.normal_world = normal_world;
-        sample.quadrature_point.area_weight = area_weight;
-        sample.quadrature_point.p0_a = p_a;
-        sample.quadrature_point.p0_b = p_b;
-        sample.quadrature_point.p_cap = 0.5 * (p_a + p_b);
-        sample.quadrature_point.h_value = h_value;
-        sample.quadrature_point.support_overlap = 2.0 * eta_h / grad_h_norm;
-        sample.quadrature_point.probe_a = probe_a;
-        sample.quadrature_point.probe_b = probe_b;
-
-        const ChVector3d speed_world_a = shape_a_frame_abs.PointSpeedLocalToParent(point_surface_a);
-        const ChVector3d speed_world_b = shape_b_frame_abs.PointSpeedLocalToParent(point_surface_b);
-        const ChVector3d relative_speed_world = speed_world_b - speed_world_a;
-        const double normal_velocity_component = Vdot(relative_speed_world, normal_world);
-        sample.normal_speed = -normal_velocity_component;
-        sample.tangential_velocity_world = relative_speed_world - normal_world * normal_velocity_component;
-        sample.tangential_speed = sample.tangential_velocity_world.Length();
-        sample.gradient_quality = 0.5 * (GradientQuality(probe_a) + GradientQuality(probe_b));
-        sample.curvature_proxy = 0.0;
-        sample.resolution_length = spacing;
-        sample.stiffness_scale =
-            LocalStiffnessScale(sample.gradient_quality, sample.curvature_proxy, sample.resolution_length, pressure_settings);
-        sample.effective_mass = ClampEffectiveMass(
-            ChSDFContactWrenchEvaluator::EstimateEffectiveMass(body_a, body_b, point_world, normal_world,
-                                                               pressure_settings.fallback_effective_mass),
-            pressure_settings);
-        sample.local_stiffness = grad_h_norm * sample.stiffness_scale;
-        sample.local_damping = pressure_settings.damping * sample.local_stiffness;
-
-        const double base_pressure = sample.quadrature_point.p_cap * sample.stiffness_scale;
-        const double damping_speed =
-            pressure_settings.use_only_closing_speed ? std::max(sample.normal_speed, 0.0) : sample.normal_speed;
-        double pressure = base_pressure;
-        if (pressure_settings.damping_ratio >= 0) {
-            const double local_damping =
-                2.0 * pressure_settings.damping_ratio *
-                std::sqrt(std::max(sample.local_stiffness, 0.0) * std::max(sample.effective_mass, 0.0));
-            sample.local_damping = local_damping;
-            pressure += local_damping * damping_speed;
-        } else {
-            pressure *= (1.0 + pressure_settings.damping * damping_speed);
-        }
-        sample.pressure = ClampPressure(pressure + pressure_settings.adhesion_pressure, pressure_settings);
-        sample.penetration =
-            sample.local_stiffness > 1.0e-12 ? std::max(base_pressure / sample.local_stiffness, 0.0) : 0.0;
-        sample.signed_gap = -sample.penetration;
-
-        if (sample.pressure <= 0) {
-            continue;
-        }
-
-        sample.traction_world = ComputeTangentialTraction(sample.tangential_velocity_world, sample.pressure, pressure_settings);
-        const ChVector3d normal_force_world_b = normal_world * (sample.pressure * sample.quadrature_area);
-        const ChVector3d tangential_force_world_b = sample.traction_world * sample.quadrature_area;
-        const ChVector3d force_world_b = normal_force_world_b + tangential_force_world_b;
-        const ChVector3d force_world_a = -force_world_b;
-        const ChVector3d torque_world_a = Vcross(point_world - shape_a_frame_abs.GetPos(), force_world_a);
-        const ChVector3d torque_world_b = Vcross(point_world - shape_b_frame_abs.GetPos(), force_world_b);
-        sample.force_world = force_world_b;
-        sample.force_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(force_world_a);
-        sample.torque_shape_a = shape_a_frame_abs.TransformDirectionParentToLocal(torque_world_a);
-        sample.force_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(force_world_b);
-        sample.torque_shape_b = shape_b_frame_abs.TransformDirectionParentToLocal(torque_world_b);
+        sample.quadrature_point.area_weight = area_sum;
+        sample.quadrature_point.p0_a = p0_a_area_sum / area_sum;
+        sample.quadrature_point.p0_b = p0_b_area_sum / area_sum;
+        sample.quadrature_point.p_cap = 0.5 * (sample.quadrature_point.p0_a + sample.quadrature_point.p0_b);
+        sample.quadrature_point.h_value = sample.quadrature_point.p0_a - sample.quadrature_point.p0_b;
+        sample.quadrature_point.support_overlap = support_overlap_area_sum / area_sum;
+        sample.quadrature_point.probe_a = rep_probe_a;
+        sample.quadrature_point.probe_b = rep_probe_b;
 
         active_samples.push_back({cell.coord, std::move(sample)});
     }
