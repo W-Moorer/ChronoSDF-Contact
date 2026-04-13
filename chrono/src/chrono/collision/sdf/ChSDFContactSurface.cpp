@@ -41,6 +41,39 @@ struct ScalarVertex {
     double value = 0;
 };
 
+struct PressureDifferenceSample {
+    bool valid = false;
+
+    double s = 0;
+    double h = 0;
+
+    ChSDFPotentialFieldProbe probe_a;
+    ChSDFPotentialFieldProbe probe_b;
+};
+
+struct EqualPressureSolveResult {
+    bool valid = false;
+
+    double s = 0;
+    double h_value = 0;
+    double support_overlap = 0;
+
+    ChVector3d point_world = VNULL;
+    ChVector3d normal_world = VNULL;
+
+    ChSDFPotentialFieldProbe probe_a;
+    ChSDFPotentialFieldProbe probe_b;
+};
+
+ShapeLineInterval BuildShapeLineInterval(const ChCollisionShapeSDF& shape,
+                                         const ChFrame<>& shape_frame_abs,
+                                         const ChVector3d& origin_world,
+                                         const ChVector3d& direction_world,
+                                         double half_length,
+                                         double step_length);
+
+ChSDFLineSupportInterval IntersectIntervals(const ShapeLineInterval& a, const ShapeLineInterval& b);
+
 double MinPositiveComponent(const ChVector3d& v) {
     double result = std::numeric_limits<double>::infinity();
     if (v.x() > 0) {
@@ -99,6 +132,170 @@ ChSDFPotentialFieldProbe ProbePotentialWorld(const ChCollisionShapeSDF& shape,
                                              const ChFrame<>& shape_frame_abs,
                                              const ChVector3d& point_world) {
     return shape.ProbePotentialLocal(shape_frame_abs.TransformPointParentToLocal(point_world));
+}
+
+PressureDifferenceSample SamplePressureDifference(const ChCollisionShapeSDF& shape_a,
+                                                 const ChFrame<>& shape_a_frame_abs,
+                                                 const ChCollisionShapeSDF& shape_b,
+                                                 const ChFrame<>& shape_b_frame_abs,
+                                                 const ChVector3d& origin_world,
+                                                 const ChVector3d& direction_world,
+                                                 double s) {
+    PressureDifferenceSample sample;
+    sample.s = s;
+
+    const ChVector3d point_world = origin_world + direction_world * s;
+    sample.probe_a = ProbePotentialWorld(shape_a, shape_a_frame_abs, point_world);
+    sample.probe_b = ProbePotentialWorld(shape_b, shape_b_frame_abs, point_world);
+    sample.valid = sample.probe_a.valid && sample.probe_b.valid;
+    if (sample.valid) {
+        sample.h = sample.probe_a.p0 - sample.probe_b.p0;
+    }
+
+    return sample;
+}
+
+ChVector3d TransformPotentialGradientWorld(const ChFrame<>& shape_frame_abs, const ChSDFPotentialFieldProbe& probe) {
+    return shape_frame_abs.TransformDirectionLocalToParent(probe.grad_p0_local);
+}
+
+ChVector3d ResolveContactNormalWorld(const ChFrame<>& shape_a_frame_abs,
+                                     const ChFrame<>& shape_b_frame_abs,
+                                     const ChSDFPotentialFieldProbe& probe_a,
+                                     const ChSDFPotentialFieldProbe& probe_b,
+                                     const ChVector3d& fallback_normal_world) {
+    const ChVector3d grad_a_world = TransformPotentialGradientWorld(shape_a_frame_abs, probe_a);
+    const ChVector3d grad_b_world = TransformPotentialGradientWorld(shape_b_frame_abs, probe_b);
+    ChVector3d normal_world = grad_a_world - grad_b_world;
+    if (normal_world.Length2() <= 1.0e-20) {
+        const ChVector3d normal_a_world = shape_a_frame_abs.TransformDirectionLocalToParent(probe_a.normal_local);
+        const ChVector3d normal_b_world = shape_b_frame_abs.TransformDirectionLocalToParent(probe_b.normal_local);
+        normal_world = normal_a_world - normal_b_world;
+    }
+
+    return SafeNormalized(normal_world, fallback_normal_world);
+}
+
+EqualPressureSolveResult SolveEqualPressureOnSupportLine(const ChCollisionShapeSDF& shape_a,
+                                                         const ChFrame<>& shape_a_frame_abs,
+                                                         const ChCollisionShapeSDF& shape_b,
+                                                         const ChFrame<>& shape_b_frame_abs,
+                                                         const ChVector3d& origin_world,
+                                                         const ChVector3d& direction_world,
+                                                         double half_length,
+                                                         double step_length,
+                                                         double equilibrium_tolerance) {
+    EqualPressureSolveResult result;
+
+    const ShapeLineInterval interval_a =
+        BuildShapeLineInterval(shape_a, shape_a_frame_abs, origin_world, direction_world, half_length, step_length);
+    const ShapeLineInterval interval_b =
+        BuildShapeLineInterval(shape_b, shape_b_frame_abs, origin_world, direction_world, half_length, step_length);
+    const ChSDFLineSupportInterval overlap = IntersectIntervals(interval_a, interval_b);
+    if (!overlap.valid) {
+        return result;
+    }
+
+    result.support_overlap = overlap.overlap_thickness;
+
+    auto finalize_sample = [&](const PressureDifferenceSample& sample) {
+        if (!sample.valid) {
+            return;
+        }
+        result.valid = true;
+        result.s = sample.s;
+        result.h_value = sample.h;
+        result.point_world = origin_world + direction_world * sample.s;
+        result.probe_a = sample.probe_a;
+        result.probe_b = sample.probe_b;
+        result.normal_world = ResolveContactNormalWorld(shape_a_frame_abs, shape_b_frame_abs, sample.probe_a, sample.probe_b,
+                                                       direction_world);
+        if (Vdot(result.normal_world, direction_world) < 0.0) {
+            result.normal_world = -result.normal_world;
+        }
+    };
+
+    if (overlap.overlap_thickness <= 1.0e-12) {
+        const PressureDifferenceSample sample =
+            SamplePressureDifference(shape_a, shape_a_frame_abs, shape_b, shape_b_frame_abs, origin_world, direction_world,
+                                     0.5 * (overlap.s_min + overlap.s_max));
+        finalize_sample(sample);
+        return result;
+    }
+
+    const double safe_step = std::max(step_length, overlap.overlap_thickness / 16.0);
+    const int samples_count =
+        std::max(4, static_cast<int>(std::ceil(overlap.overlap_thickness / std::max(safe_step, 1.0e-8))));
+
+    PressureDifferenceSample best_sample;
+    best_sample.valid = false;
+    PressureDifferenceSample previous_sample;
+    previous_sample.valid = false;
+
+    auto update_best = [&](const PressureDifferenceSample& sample) {
+        if (!sample.valid) {
+            return;
+        }
+        if (!best_sample.valid || std::abs(sample.h) < std::abs(best_sample.h)) {
+            best_sample = sample;
+        }
+    };
+
+    for (int i = 0; i <= samples_count; ++i) {
+        const double alpha = static_cast<double>(i) / static_cast<double>(samples_count);
+        const double s = overlap.s_min + (overlap.s_max - overlap.s_min) * alpha;
+        const PressureDifferenceSample current_sample =
+            SamplePressureDifference(shape_a, shape_a_frame_abs, shape_b, shape_b_frame_abs, origin_world, direction_world, s);
+        update_best(current_sample);
+
+        if (!current_sample.valid) {
+            previous_sample.valid = false;
+            continue;
+        }
+
+        if (std::abs(current_sample.h) <= equilibrium_tolerance) {
+            finalize_sample(current_sample);
+            return result;
+        }
+
+        if (previous_sample.valid && previous_sample.h * current_sample.h <= 0.0) {
+            double low = previous_sample.s;
+            double high = current_sample.s;
+            PressureDifferenceSample low_sample = previous_sample;
+            PressureDifferenceSample high_sample = current_sample;
+
+            for (int iter = 0; iter < 40; ++iter) {
+                const double mid = 0.5 * (low + high);
+                const PressureDifferenceSample mid_sample = SamplePressureDifference(
+                    shape_a, shape_a_frame_abs, shape_b, shape_b_frame_abs, origin_world, direction_world, mid);
+                if (!mid_sample.valid) {
+                    break;
+                }
+
+                update_best(mid_sample);
+                if (std::abs(mid_sample.h) <= equilibrium_tolerance || std::abs(high - low) <= 1.0e-8) {
+                    finalize_sample(mid_sample);
+                    return result;
+                }
+
+                if (low_sample.h * mid_sample.h <= 0.0) {
+                    high = mid;
+                    high_sample = mid_sample;
+                } else {
+                    low = mid;
+                    low_sample = mid_sample;
+                }
+            }
+
+            finalize_sample(std::abs(low_sample.h) <= std::abs(high_sample.h) ? low_sample : high_sample);
+            return result;
+        }
+
+        previous_sample = current_sample;
+    }
+
+    finalize_sample(best_sample);
+    return result;
 }
 
 bool FindPhiRootOnLine(const ChCollisionShapeSDF& shape,
@@ -393,6 +590,64 @@ std::size_t NodeIndex(std::size_t iu, std::size_t iv, std::size_t nodes_u) {
     return iv * nodes_u + iu;
 }
 
+double TriangleAreaXY(const ChVector3d& a, const ChVector3d& b, const ChVector3d& c) {
+    const double twice_area = (b.x() - a.x()) * (c.y() - a.y()) - (c.x() - a.x()) * (b.y() - a.y());
+    return 0.5 * std::abs(twice_area);
+}
+
+void AppendPolygonQuadraturePoints(std::vector<ChSDFContactQuadraturePoint>& quadrature_points,
+                                   const ChSDFContactSurfacePolygon& polygon,
+                                   const ChFrame<>& chart_frame_world,
+                                   const ChCollisionShapeSDF& shape_a,
+                                   const ChFrame<>& shape_a_frame_abs,
+                                   const ChCollisionShapeSDF& shape_b,
+                                   const ChFrame<>& shape_b_frame_abs,
+                                   const ChVector3d& chart_normal_world,
+                                   double search_half_length,
+                                   double line_step,
+                                   double equilibrium_tolerance) {
+    if (polygon.vertices_uv.size() < 3) {
+        return;
+    }
+
+    const ChVector3d centroid_uv = polygon.centroid_uv;
+    for (std::size_t i = 0; i < polygon.vertices_uv.size(); ++i) {
+        const ChVector3d& uv0 = polygon.vertices_uv[i];
+        const ChVector3d& uv1 = polygon.vertices_uv[(i + 1) % polygon.vertices_uv.size()];
+
+        const double triangle_area_uv = TriangleAreaXY(centroid_uv, uv0, uv1);
+        if (triangle_area_uv <= 1.0e-12) {
+            continue;
+        }
+
+        const ChVector3d quadrature_uv = (centroid_uv + uv0 + uv1) / 3.0;
+        const ChVector3d anchor_world = chart_frame_world.TransformPointLocalToParent(quadrature_uv);
+        const EqualPressureSolveResult solve = SolveEqualPressureOnSupportLine(
+            shape_a, shape_a_frame_abs, shape_b, shape_b_frame_abs, anchor_world, chart_normal_world, search_half_length,
+            line_step, equilibrium_tolerance);
+        if (!solve.valid) {
+            continue;
+        }
+
+        const double projection_cos = std::max(std::abs(Vdot(solve.normal_world, chart_normal_world)), 1.0e-6);
+
+        ChSDFContactQuadraturePoint quadrature_point;
+        quadrature_point.point_world = solve.point_world;
+        quadrature_point.point_shape_a = shape_a_frame_abs.TransformPointParentToLocal(solve.point_world);
+        quadrature_point.point_shape_b = shape_b_frame_abs.TransformPointParentToLocal(solve.point_world);
+        quadrature_point.normal_world = solve.normal_world;
+        quadrature_point.area_weight = triangle_area_uv / projection_cos;
+        quadrature_point.p0_a = solve.probe_a.p0;
+        quadrature_point.p0_b = solve.probe_b.p0;
+        quadrature_point.p_cap = 0.5 * (quadrature_point.p0_a + quadrature_point.p0_b);
+        quadrature_point.h_value = solve.h_value;
+        quadrature_point.support_overlap = solve.support_overlap;
+        quadrature_point.probe_a = solve.probe_a;
+        quadrature_point.probe_b = solve.probe_b;
+        quadrature_points.push_back(std::move(quadrature_point));
+    }
+}
+
 double ResolveBaseSpacing(const ChSDFBrickPairRegion& region,
                           const ChCollisionShapeSDF& shape_a,
                           const ChCollisionShapeSDF& shape_b,
@@ -661,6 +916,18 @@ ChSDFContactSurfaceRegion ChSDFContactSurfaceBuilder::BuildRegionSurface(const C
             }
 
             surface.cells.push_back(std::move(cell));
+        }
+    }
+
+    for (const auto& cell : surface.cells) {
+        if (!cell.active) {
+            continue;
+        }
+
+        for (const auto& polygon : cell.clipped_polygons) {
+            AppendPolygonQuadraturePoints(surface.quadrature_points, polygon, surface.chart_frame_world, shape_a,
+                                          shape_a_frame_abs, shape_b, shape_b_frame_abs, chart_normal_world,
+                                          search_half_length, line_step, chart_settings.equilibrium_tolerance);
         }
     }
 
