@@ -166,7 +166,9 @@ ChVector3d ResolveContactNormalWorld(const ChFrame<>& shape_a_frame_abs,
                                      const ChVector3d& fallback_normal_world) {
     const ChVector3d grad_a_world = TransformPotentialGradientWorld(shape_a_frame_abs, probe_a);
     const ChVector3d grad_b_world = TransformPotentialGradientWorld(shape_b_frame_abs, probe_b);
-    ChVector3d normal_world = grad_a_world - grad_b_world;
+    // Keep the region-contact convention used by the legacy Chrono path:
+    // normal points from shape A toward shape B.
+    ChVector3d normal_world = grad_b_world - grad_a_world;
     if (normal_world.Length2() <= 1.0e-20) {
         const ChVector3d normal_a_world = shape_a_frame_abs.TransformDirectionLocalToParent(probe_a.normal_local);
         const ChVector3d normal_b_world = shape_b_frame_abs.TransformDirectionLocalToParent(probe_b.normal_local);
@@ -210,7 +212,7 @@ EqualPressureSolveResult SolveEqualPressureOnSupportLine(const ChCollisionShapeS
         result.probe_b = sample.probe_b;
         result.normal_world = ResolveContactNormalWorld(shape_a_frame_abs, shape_b_frame_abs, sample.probe_a, sample.probe_b,
                                                        direction_world);
-        if (Vdot(result.normal_world, direction_world) < 0.0) {
+        if (Vdot(result.normal_world, direction_world) > 0.0) {
             result.normal_world = -result.normal_world;
         }
     };
@@ -629,14 +631,15 @@ void AppendPolygonQuadraturePoints(std::vector<ChSDFContactQuadraturePoint>& qua
             continue;
         }
 
-        const double projection_cos = std::max(std::abs(Vdot(solve.normal_world, chart_normal_world)), 1.0e-6);
-
         ChSDFContactQuadraturePoint quadrature_point;
         quadrature_point.point_world = solve.point_world;
         quadrature_point.point_shape_a = shape_a_frame_abs.TransformPointParentToLocal(solve.point_world);
         quadrature_point.point_shape_b = shape_b_frame_abs.TransformPointParentToLocal(solve.point_world);
         quadrature_point.normal_world = solve.normal_world;
-        quadrature_point.area_weight = triangle_area_uv / projection_cos;
+        // Use the clipped chart area directly. The equal-pressure normal is still
+        // an approximate lift from the chart, and the projection amplification is
+        // numerically unstable in the current SDF chart construction.
+        quadrature_point.area_weight = triangle_area_uv;
         quadrature_point.p0_a = solve.probe_a.p0;
         quadrature_point.p0_b = solve.probe_b.p0;
         quadrature_point.p_cap = 0.5 * (quadrature_point.p0_a + quadrature_point.p0_b);
