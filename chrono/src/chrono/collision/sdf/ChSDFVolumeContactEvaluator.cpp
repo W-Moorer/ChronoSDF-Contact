@@ -222,7 +222,10 @@ double RegularizedDelta(double h_value, double eta_h) {
 }
 
 double ResolvePressureBandWidth(double grad_h_norm, double spacing) {
-    const double geometric_band = 2.0 * std::max(spacing, 1.0e-8);
+    // With the current 2x2x2 cell-wise quadrature, a half-cell geometric band keeps
+    // the regularized delta normalized to the actual contact footprint instead of
+    // under-integrating each active cell by roughly a factor of four.
+    const double geometric_band = 0.5 * std::max(spacing, 1.0e-8);
     return std::max(grad_h_norm * geometric_band, 1.0e-12);
 }
 

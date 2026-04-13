@@ -27,3 +27,17 @@ endif()
 target_link_libraries(sdf_contact_benchmarks PRIVATE ${CHRONO_TARGETS})
 
 add_CHRONO_DLLS_copy_command()
+
+if(TARGET COPY_CHRONO_DLLS)
+    add_dependencies(sdf_contact_benchmarks COPY_CHRONO_DLLS)
+endif()
+
+if(WIN32 AND TARGET Chrono::Chrono_core)
+    add_custom_target(sync_benchmark_chrono_core
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:Chrono::Chrono_core>
+                ${PROJECT_BINARY_DIR}/$<CONFIG>
+        VERBATIM
+    )
+    add_dependencies(sdf_contact_benchmarks sync_benchmark_chrono_core)
+endif()
