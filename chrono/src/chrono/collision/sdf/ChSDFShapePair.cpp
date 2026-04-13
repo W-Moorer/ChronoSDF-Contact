@@ -115,8 +115,10 @@ ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
     }
 
     const auto regions = BuildContactRegions(pair_settings, region_settings);
-    return ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(regions, GetShapeAFrameAbsMoving(),
-                                                                 GetShapeBFrameAbsMoving(), pressure_settings);
+    return ChSDFContactWrenchEvaluator::EvaluateBrickPairRegions(
+        regions, GetShapeAFrameAbsMoving(), GetShapeBFrameAbsMoving(),
+        ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_a),
+        ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_b), pressure_settings);
 }
 
 bool ChSDFShapePair::Apply(const ChSDFShapePairContactResult& result) {

@@ -20,12 +20,25 @@
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
 #include "chrono/core/ChFrame.h"
 #include "chrono/core/ChFrameMoving.h"
+#include "chrono/core/ChMatrix33.h"
 #include "chrono/core/ChVector3.h"
 
 namespace chrono {
 
+class ChBody;
+
 /// @addtogroup chrono_collision
 /// @{
+
+/// Rigid-body mass properties reduced to the data needed for local effective-mass estimates.
+struct ChApi ChSDFEffectiveMassProperties {
+    bool valid = false;
+    bool fixed = false;
+
+    double mass = 0;
+    ChVector3d com_world = VNULL;
+    ChMatrix33<> inv_inertia_world;
+};
 
 /// Relative patch kinematics expressed in the local frame of an SDF shape.
 /// The linear velocity is the relative velocity of the patch origin with respect to the SDF shape.
@@ -33,6 +46,9 @@ namespace chrono {
 struct ChApi ChSDFPatchKinematics {
     ChVector3d linear_velocity = VNULL;
     ChVector3d angular_velocity = VNULL;
+    ChSDFEffectiveMassProperties body_a;
+    ChSDFEffectiveMassProperties body_b;
+    double fallback_effective_mass = -1;
 
     /// Evaluate the relative velocity at a local point on the patch.
     ChVector3d PointVelocity(const ChVector3d& point_shape, const ChFrame<>& patch_frame_shape) const;
@@ -44,6 +60,7 @@ struct ChApi ChSDFPatchKinematics {
 struct ChApi ChSDFNormalPressureSettings {
     double stiffness = 1.0e7;
     double damping = 0;
+    double damping_ratio = -1;
     double distance_offset = 0;
     double adhesion_pressure = 0;
     double max_pressure = -1;
@@ -57,6 +74,9 @@ struct ChApi ChSDFNormalPressureSettings {
     double reference_resolution_length = -1;
     double min_stiffness_scale = 0;
     double max_stiffness_scale = -1;
+    double min_effective_mass = 0;
+    double max_effective_mass = -1;
+    double fallback_effective_mass = -1;
     /// Regularized Coulomb friction coefficient used for the tangential traction density.
     double friction_coefficient = 0;
     /// Velocity scale used in the smooth traction law t = -mu * p * vt / sqrt(|vt|^2 + eps^2).
@@ -81,6 +101,7 @@ struct ChApi ChSDFContactWrenchSample {
     double curvature_proxy = 0;
     double resolution_length = 0;
     double stiffness_scale = 1;
+    double effective_mass = 0;
     double local_stiffness = 0;
     double local_damping = 0;
     double pressure = 0;
@@ -118,7 +139,9 @@ struct ChApi ChSDFContactWrenchResult {
     double integrated_pressure = 0;
     double mean_pressure = 0;
     double mean_local_stiffness = 0;
+    double mean_effective_mass = 0;
     double max_local_stiffness = 0;
+    double max_effective_mass = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
@@ -145,6 +168,7 @@ struct ChApi ChSDFBrickPairWrenchSample {
     double curvature_proxy = 0;
     double resolution_length = 0;
     double stiffness_scale = 1;
+    double effective_mass = 0;
     double local_stiffness = 0;
     double local_damping = 0;
     double pressure = 0;
@@ -181,7 +205,9 @@ struct ChApi ChSDFBrickPairWrenchResult {
     double integrated_pressure = 0;
     double mean_pressure = 0;
     double mean_local_stiffness = 0;
+    double mean_effective_mass = 0;
     double max_local_stiffness = 0;
+    double max_effective_mass = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
@@ -211,7 +237,9 @@ struct ChApi ChSDFShapePairContactResult {
     double integrated_pressure = 0;
     double mean_pressure = 0;
     double mean_local_stiffness = 0;
+    double mean_effective_mass = 0;
     double max_local_stiffness = 0;
+    double max_effective_mass = 0;
     double max_penetration = 0;
     double max_pressure = 0;
 
@@ -223,6 +251,16 @@ struct ChApi ChSDFShapePairContactResult {
 /// Distributed contact evaluator that turns a sampled SDF patch into a net wrench.
 class ChApi ChSDFContactWrenchEvaluator {
   public:
+    /// Extract the rigid-body data required for local effective-mass estimates.
+    static ChSDFEffectiveMassProperties MakeEffectiveMassProperties(ChBody* body);
+
+    /// Estimate the local effective mass along a contact normal at the specified world point.
+    static double EstimateEffectiveMass(const ChSDFEffectiveMassProperties& body_a,
+                                        const ChSDFEffectiveMassProperties& body_b,
+                                        const ChVector3d& point_world,
+                                        const ChVector3d& normal_world,
+                                        double fallback_effective_mass = -1);
+
     /// Evaluate a pre-sampled patch against a penalty law with optional tangential traction.
     static ChSDFContactWrenchResult EvaluatePatch(const ChSDFContactPatch& patch,
                                                   const ChSDFContactPatchSampler::Settings& patch_settings,
@@ -240,6 +278,8 @@ class ChApi ChSDFContactWrenchEvaluator {
     static ChSDFBrickPairWrenchResult EvaluateBrickPairRegion(const ChSDFBrickPairRegion& region,
                                                               const ChFrameMoving<>& shape_a_frame_abs,
                                                               const ChFrameMoving<>& shape_b_frame_abs,
+                                                              const ChSDFEffectiveMassProperties& body_a,
+                                                              const ChSDFEffectiveMassProperties& body_b,
                                                               const ChSDFNormalPressureSettings& pressure_settings);
 
     /// Evaluate multiple parameterized dual-SDF connected regions and aggregate the resulting wrenches.
@@ -247,6 +287,8 @@ class ChApi ChSDFContactWrenchEvaluator {
         const std::vector<ChSDFBrickPairRegion>& regions,
         const ChFrameMoving<>& shape_a_frame_abs,
         const ChFrameMoving<>& shape_b_frame_abs,
+        const ChSDFEffectiveMassProperties& body_a,
+        const ChSDFEffectiveMassProperties& body_b,
         const ChSDFNormalPressureSettings& pressure_settings);
 };
 

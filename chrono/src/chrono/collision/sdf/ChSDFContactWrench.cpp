@@ -16,6 +16,8 @@
 #include <cmath>
 #include <unordered_map>
 
+#include "chrono/physics/ChBody.h"
+
 namespace chrono {
 namespace {
 
@@ -104,6 +106,62 @@ double LocalStiffnessScale(double gradient_quality,
     }
 
     return scale;
+}
+
+double ClampEffectiveMass(double effective_mass, const ChSDFNormalPressureSettings& settings) {
+    if (settings.min_effective_mass > 0) {
+        effective_mass = std::max(effective_mass, settings.min_effective_mass);
+    }
+
+    if (settings.max_effective_mass >= 0) {
+        effective_mass = std::min(effective_mass, settings.max_effective_mass);
+    }
+
+    return effective_mass;
+}
+
+double InverseEffectiveMassContribution(const ChSDFEffectiveMassProperties& body,
+                                        const ChVector3d& point_world,
+                                        const ChVector3d& normal_world) {
+    if (!body.valid || body.fixed || body.mass <= 1.0e-20) {
+        return 0.0;
+    }
+
+    const ChVector3d r = point_world - body.com_world;
+    const ChVector3d rxn = Vcross(r, normal_world);
+    const ChVector3d ang = body.inv_inertia_world * rxn;
+
+    return (1.0 / body.mass) + Vdot(normal_world, Vcross(ang, r));
+}
+
+double EstimateEffectiveMassImpl(const ChSDFEffectiveMassProperties& body_a,
+                                 const ChSDFEffectiveMassProperties& body_b,
+                                 const ChVector3d& point_world,
+                                 const ChVector3d& normal_world,
+                                 double fallback_effective_mass) {
+    const double inverse_mass = InverseEffectiveMassContribution(body_a, point_world, normal_world) +
+                                InverseEffectiveMassContribution(body_b, point_world, normal_world);
+
+    if (inverse_mass > 1.0e-20) {
+        return 1.0 / inverse_mass;
+    }
+
+    return fallback_effective_mass > 0 ? fallback_effective_mass : 0.0;
+}
+
+double ResolveLocalDamping(double local_stiffness,
+                           double effective_mass,
+                           double stiffness_scale,
+                           const ChSDFNormalPressureSettings& settings) {
+    if (settings.damping_ratio >= 0) {
+        if (local_stiffness <= 0 || effective_mass <= 0) {
+            return 0.0;
+        }
+
+        return 2.0 * settings.damping_ratio * std::sqrt(local_stiffness * effective_mass);
+    }
+
+    return settings.damping * std::sqrt(std::max(stiffness_scale, 0.0));
 }
 
 ChVector3d ComputeTangentialTraction(const ChVector3d& tangential_velocity,
@@ -235,6 +293,31 @@ std::vector<double> EstimateRegionCurvatureProxies(const ChSDFBrickPairRegion& r
 
 }  // namespace
 
+ChSDFEffectiveMassProperties ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(ChBody* body) {
+    ChSDFEffectiveMassProperties properties;
+    if (!body) {
+        return properties;
+    }
+
+    properties.valid = true;
+    properties.fixed = body->IsFixed();
+    properties.mass = body->GetMass();
+    properties.com_world = body->GetFrameCOMToAbs().GetPos();
+
+    const ChMatrix33<>& rot = body->GetFrameCOMToAbs().GetRotMat();
+    properties.inv_inertia_world = rot * body->GetInvInertia() * rot.transpose();
+
+    return properties;
+}
+
+double ChSDFContactWrenchEvaluator::EstimateEffectiveMass(const ChSDFEffectiveMassProperties& body_a,
+                                                          const ChSDFEffectiveMassProperties& body_b,
+                                                          const ChVector3d& point_world,
+                                                          const ChVector3d& normal_world,
+                                                          double fallback_effective_mass) {
+    return EstimateEffectiveMassImpl(body_a, body_b, point_world, normal_world, fallback_effective_mass);
+}
+
 ChVector3d ChSDFPatchKinematics::PointVelocity(const ChVector3d& point_shape, const ChFrame<>& patch_frame_shape) const {
     return linear_velocity + Vcross(angular_velocity, point_shape - patch_frame_shape.GetPos());
 }
@@ -262,6 +345,7 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
     double local_stiffness_area_sum = 0;
+    double effective_mass_area_sum = 0;
 
     result.samples.reserve(patch.samples.size());
 
@@ -296,8 +380,15 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
         sample.resolution_length = resolution_length;
         sample.stiffness_scale = LocalStiffnessScale(sample.gradient_quality, sample.curvature_proxy,
                                                      sample.resolution_length, pressure_settings);
+        sample.effective_mass = ClampEffectiveMass(
+            EstimateEffectiveMassImpl(relative_kinematics.body_a, relative_kinematics.body_b, sample.point_shape,
+                                      patch_sample.probe.normal_world,
+                                      relative_kinematics.fallback_effective_mass > 0 ? relative_kinematics.fallback_effective_mass
+                                                                                       : pressure_settings.fallback_effective_mass),
+            pressure_settings);
         sample.local_stiffness = pressure_settings.stiffness * sample.stiffness_scale;
-        sample.local_damping = pressure_settings.damping * std::sqrt(std::max(sample.stiffness_scale, 0.0));
+        sample.local_damping =
+            ResolveLocalDamping(sample.local_stiffness, sample.effective_mass, sample.stiffness_scale, pressure_settings);
 
         sample.pressure = sample.local_stiffness * sample.penetration +
                           sample.local_damping * damping_speed + pressure_settings.adhesion_pressure;
@@ -330,7 +421,9 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
             result.active_area += sample.quadrature_area;
             result.integrated_pressure += sample.pressure * sample.quadrature_area;
             local_stiffness_area_sum += sample.local_stiffness * sample.quadrature_area;
+            effective_mass_area_sum += sample.effective_mass * sample.quadrature_area;
             result.max_local_stiffness = std::max(result.max_local_stiffness, sample.local_stiffness);
+            result.max_effective_mass = std::max(result.max_effective_mass, sample.effective_mass);
             result.max_penetration = std::max(result.max_penetration, sample.penetration);
             result.max_pressure = std::max(result.max_pressure, sample.pressure);
 
@@ -346,6 +439,7 @@ ChSDFContactWrenchResult ChSDFContactWrenchEvaluator::EvaluatePatch(
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
         result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
+        result.mean_effective_mass = effective_mass_area_sum / result.active_area;
     }
 
     if (pressure_weight_sum > 0) {
@@ -369,6 +463,8 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     const ChSDFBrickPairRegion& region,
     const ChFrameMoving<>& shape_a_frame_abs,
     const ChFrameMoving<>& shape_b_frame_abs,
+    const ChSDFEffectiveMassProperties& body_a,
+    const ChSDFEffectiveMassProperties& body_b,
     const ChSDFNormalPressureSettings& pressure_settings) {
     ChSDFBrickPairWrenchResult result;
     result.region = region;
@@ -390,6 +486,7 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     double pressure_weight_sum = 0;
     ChVector3d pressure_center_sum = VNULL;
     double local_stiffness_area_sum = 0;
+    double effective_mass_area_sum = 0;
 
     result.samples.reserve(region.samples.size());
 
@@ -419,8 +516,13 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
         sample.resolution_length = resolution_length;
         sample.stiffness_scale = LocalStiffnessScale(sample.gradient_quality, sample.curvature_proxy,
                                                      sample.resolution_length, pressure_settings);
+        sample.effective_mass = ClampEffectiveMass(
+            EstimateEffectiveMassImpl(body_a, body_b, region_sample.point_world, region_sample.contact_normal_world,
+                                      pressure_settings.fallback_effective_mass),
+            pressure_settings);
         sample.local_stiffness = pressure_settings.stiffness * sample.stiffness_scale;
-        sample.local_damping = pressure_settings.damping * std::sqrt(std::max(sample.stiffness_scale, 0.0));
+        sample.local_damping =
+            ResolveLocalDamping(sample.local_stiffness, sample.effective_mass, sample.stiffness_scale, pressure_settings);
         sample.pressure = sample.local_stiffness * sample.penetration +
                           sample.local_damping * damping_speed + pressure_settings.adhesion_pressure;
         sample.pressure = ClampPressure(sample.pressure, pressure_settings);
@@ -460,7 +562,9 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
             result.active_area += sample.quadrature_area;
             result.integrated_pressure += sample.pressure * sample.quadrature_area;
             local_stiffness_area_sum += sample.local_stiffness * sample.quadrature_area;
+            effective_mass_area_sum += sample.effective_mass * sample.quadrature_area;
             result.max_local_stiffness = std::max(result.max_local_stiffness, sample.local_stiffness);
+            result.max_effective_mass = std::max(result.max_effective_mass, sample.effective_mass);
             result.max_penetration = std::max(result.max_penetration, sample.penetration);
             result.max_pressure = std::max(result.max_pressure, sample.pressure);
 
@@ -475,6 +579,7 @@ ChSDFBrickPairWrenchResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion(
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
         result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
+        result.mean_effective_mass = effective_mass_area_sum / result.active_area;
     }
 
     if (pressure_weight_sum > 0) {
@@ -488,6 +593,8 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
     const std::vector<ChSDFBrickPairRegion>& regions,
     const ChFrameMoving<>& shape_a_frame_abs,
     const ChFrameMoving<>& shape_b_frame_abs,
+    const ChSDFEffectiveMassProperties& body_a,
+    const ChSDFEffectiveMassProperties& body_b,
     const ChSDFNormalPressureSettings& pressure_settings) {
     ChSDFShapePairContactResult result;
     result.valid = true;
@@ -496,16 +603,20 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
     result.total_regions = regions.size();
     result.regions.reserve(regions.size());
     double local_stiffness_area_sum = 0;
+    double effective_mass_area_sum = 0;
 
     for (const auto& region : regions) {
-        auto region_result = EvaluateBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, pressure_settings);
+        auto region_result =
+            EvaluateBrickPairRegion(region, shape_a_frame_abs, shape_b_frame_abs, body_a, body_b, pressure_settings);
 
         if (region_result.HasActiveContact()) {
             result.active_regions++;
             result.active_area += region_result.active_area;
             result.integrated_pressure += region_result.integrated_pressure;
             local_stiffness_area_sum += region_result.mean_local_stiffness * region_result.active_area;
+            effective_mass_area_sum += region_result.mean_effective_mass * region_result.active_area;
             result.max_local_stiffness = std::max(result.max_local_stiffness, region_result.max_local_stiffness);
+            result.max_effective_mass = std::max(result.max_effective_mass, region_result.max_effective_mass);
             result.max_penetration = std::max(result.max_penetration, region_result.max_penetration);
             result.max_pressure = std::max(result.max_pressure, region_result.max_pressure);
         }
@@ -525,6 +636,7 @@ ChSDFShapePairContactResult ChSDFContactWrenchEvaluator::EvaluateBrickPairRegion
     if (result.active_area > 0) {
         result.mean_pressure = result.integrated_pressure / result.active_area;
         result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
+        result.mean_effective_mass = effective_mass_area_sum / result.active_area;
     }
 
     return result;

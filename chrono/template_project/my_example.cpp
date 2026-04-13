@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
 
     ChSDFNormalPressureSettings pressure_settings;
     pressure_settings.stiffness = 4.0e5;
-    pressure_settings.damping = 4.0e3;
+    pressure_settings.damping_ratio = 0.20;
     pressure_settings.max_pressure = 2.0e6;
     pressure_settings.gradient_quality_gain = 2.0;
     pressure_settings.resolution_scale_gain = 1.0;
@@ -169,7 +169,8 @@ int main(int argc, char* argv[]) {
             std::cout << "t=" << sys.GetChTime() << "  x=" << moving_body->GetPos().x()
                       << "  y=" << moving_body->GetPos().y() << "  vx=" << moving_body->GetLinVel().x()
                       << "  vy=" << moving_body->GetLinVel().y() << "  active_regions=" << result.active_regions
-                      << "  k_mean=" << result.mean_local_stiffness << "  k_max=" << result.max_local_stiffness
+                      << "  m_eff=" << result.mean_effective_mass << "  k_mean=" << result.mean_local_stiffness
+                      << "  k_max=" << result.max_local_stiffness
                       << "  Fx=" << result.wrench_world_b.force.x() << "  Fy=" << result.wrench_world_b.force.y()
                       << "\n";
         }
@@ -185,6 +186,8 @@ int main(int argc, char* argv[]) {
     std::cout << "  moving vy:     " << moving_body->GetLinVel().y() << "\n";
     std::cout << "  min y:         " << min_height << "\n";
     std::cout << "  contact steps: " << contact_steps << "\n";
+    std::cout << "  mean m_eff:    " << last_result.mean_effective_mass << "\n";
+    std::cout << "  max m_eff:     " << last_result.max_effective_mass << "\n";
     std::cout << "  mean k:        " << last_result.mean_local_stiffness << "\n";
     std::cout << "  max k:         " << last_result.max_local_stiffness << "\n";
     std::cout << "  max |Fx|:      " << max_abs_tangential_force << "\n";
@@ -203,6 +206,11 @@ int main(int argc, char* argv[]) {
     if (max_abs_tangential_force <= 1.0) {
         std::cerr << "The demo did not detect any meaningful tangential traction.\n";
         return 5;
+    }
+
+    if (last_result.mean_effective_mass <= 1.0) {
+        std::cerr << "The demo did not detect any meaningful local effective mass.\n";
+        return 6;
     }
 
     return 0;

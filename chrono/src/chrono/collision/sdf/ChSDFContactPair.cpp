@@ -64,6 +64,9 @@ ChSDFContactPair::Result ChSDFContactPair::EvaluatePatchFrame(const ChFrame<>& p
 
     result.relative_kinematics_shape.linear_velocity = patch_frame_shape_moving.GetPosDt();
     result.relative_kinematics_shape.angular_velocity = patch_frame_shape_moving.GetAngVelParent();
+    result.relative_kinematics_shape.body_a = ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_sdf_body);
+    result.relative_kinematics_shape.body_b = ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_patch_body);
+    result.relative_kinematics_shape.fallback_effective_mass = m_pressure_settings.fallback_effective_mass;
 
     result.patch_result = ChSDFContactWrenchEvaluator::EvaluatePatchLocal(
         *m_sdf_shape, result.patch_frame_shape, m_patch_settings, result.relative_kinematics_shape, m_pressure_settings);
