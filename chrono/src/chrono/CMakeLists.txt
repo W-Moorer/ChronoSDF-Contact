@@ -698,6 +698,7 @@ set(Chrono_collision_SOURCES
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
     collision/sdf/ChSDFContactSurface.cpp
+    collision/sdf/ChSDFSheetRepresentation.cpp
     collision/sdf/ChSDFPFCEvaluator.cpp
     collision/sdf/ChSDFVolumeContactEvaluator.cpp
     collision/sdf/ChSDFShapePair.cpp
@@ -739,6 +740,7 @@ set(Chrono_collision_HEADERS
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
     collision/sdf/ChSDFContactSurface.h
+    collision/sdf/ChSDFSheetRepresentation.h
     collision/sdf/ChSDFPFCEvaluator.h
     collision/sdf/ChSDFVolumeContactEvaluator.h
     collision/sdf/ChSDFShapePair.h
@@ -755,6 +757,7 @@ set(Chrono_collision_sdf_SOURCES
     collision/sdf/ChSDFContactPatch.cpp
     collision/sdf/ChSDFContactRegion.cpp
     collision/sdf/ChSDFContactSurface.cpp
+    collision/sdf/ChSDFSheetRepresentation.cpp
     collision/sdf/ChSDFPFCEvaluator.cpp
     collision/sdf/ChSDFVolumeContactEvaluator.cpp
     collision/sdf/ChSDFShapePair.cpp
@@ -769,6 +772,7 @@ set(Chrono_collision_sdf_HEADERS
     collision/sdf/ChSDFContactPatch.h
     collision/sdf/ChSDFContactRegion.h
     collision/sdf/ChSDFContactSurface.h
+    collision/sdf/ChSDFSheetRepresentation.h
     collision/sdf/ChSDFPFCEvaluator.h
     collision/sdf/ChSDFVolumeContactEvaluator.h
     collision/sdf/ChSDFShapePair.h
