@@ -56,6 +56,14 @@ struct SupportCellKeyHash {
     }
 };
 
+struct SheetCellTopologyStats {
+    std::size_t layered_cell_count = 0;
+    std::size_t max_layer_count_per_cell = 0;
+    std::size_t largest_connected_sheet_cells = 0;
+    double mean_layer_count_per_cell = 0;
+    double fill_ratio = 0;
+};
+
 struct SpatialHashKey {
     int x = 0;
     int y = 0;
@@ -296,6 +304,11 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
     patch.support_footprint = ChSDFSheetLocalFootprint();
+    patch.layered_cell_count = 0;
+    patch.max_layer_count_per_cell = 0;
+    patch.largest_connected_sheet_cells = 0;
+    patch.mean_layer_count_per_cell = 0;
+    patch.sheet_fill_ratio = 0;
     patch.support_cells.clear();
 
     if (patch.sample_indices.empty()) {
@@ -504,87 +517,221 @@ ProjectedHullMetrics ComputeProjectedHullMetrics(const std::vector<ChVector3d>& 
     return metrics;
 }
 
-std::vector<ChSDFPatchPlaneSupportCell> BuildPatchPlaneSupportCells(const ChSDFSheetPatch& patch,
-                                                                   const std::vector<ChSDFSheetFiberSample>& samples,
-                                                                   const ChVector3d& patch_origin_world,
-                                                                   const ChVector3d& patch_normal_world,
-                                                                   double cell_size) {
-    std::vector<ChSDFPatchPlaneSupportCell> support_cells;
+SupportCellKey MakeSupportCellKey(const ChSDFSheetSupportEvidence& evidence) {
+    int iu = 0;
+    int iv = 0;
+    switch (evidence.source_carrier_axis) {
+        case 0:
+            iu = evidence.source_coord.y();
+            iv = evidence.source_coord.z();
+            break;
+        case 1:
+            iu = evidence.source_coord.x();
+            iv = evidence.source_coord.z();
+            break;
+        case 2:
+        default:
+            iu = evidence.source_coord.x();
+            iv = evidence.source_coord.y();
+            break;
+    }
+    return SupportCellKey{evidence.source_carrier_axis, iu, iv};
+}
+
+std::vector<ChSDFPatchPlaneLayeredCell> BuildPatchPlaneLayeredCells(const ChSDFSheetPatch& patch,
+                                                                    const std::vector<ChSDFSheetFiberSample>& samples,
+                                                                    const ChVector3d& patch_origin_world,
+                                                                    const ChVector3d& patch_normal_world,
+                                                                    double cell_size) {
+    std::vector<ChSDFPatchPlaneLayeredCell> layered_cells;
     if (patch.sample_indices.empty() || cell_size <= 1.0e-12) {
-        return support_cells;
+        return layered_cells;
     }
 
     ChVector3d tangent_u;
     ChVector3d tangent_v;
     BuildOrthonormalBasis(patch_normal_world, tangent_u, tangent_v);
 
-    std::unordered_map<SupportCellKey, ChSDFPatchPlaneSupportCell, SupportCellKeyHash> cell_map;
+    std::unordered_map<SupportCellKey, ChSDFPatchPlaneLayeredCell, SupportCellKeyHash> cell_map;
     cell_map.reserve(patch.sample_indices.size() * 4);
 
     for (const auto sample_index : patch.sample_indices) {
         const auto& sample = samples[sample_index];
         for (const auto& evidence : sample.support_evidence) {
-            int iu = 0;
-            int iv = 0;
-            switch (evidence.source_carrier_axis) {
-                case 0:
-                    iu = evidence.source_coord.y();
-                    iv = evidence.source_coord.z();
-                    break;
-                case 1:
-                    iu = evidence.source_coord.x();
-                    iv = evidence.source_coord.z();
-                    break;
-                case 2:
-                default:
-                    iu = evidence.source_coord.x();
-                    iv = evidence.source_coord.y();
-                    break;
-            }
-
-            const SupportCellKey key{evidence.source_carrier_axis, iu, iv};
+            const SupportCellKey key = MakeSupportCellKey(evidence);
             auto& cell = cell_map[key];
             cell.carrier_axis = evidence.source_carrier_axis;
-            cell.cell_ij = ChVector2i(iu, iv);
+            cell.cell_ij = ChVector2i(key.u, key.v);
             cell.half_extents_uv = ChVector2d(0.5 * cell_size, 0.5 * cell_size);
-            cell.measure_area += evidence.measure_area;
-            cell.occupied = true;
-            cell.source_sample_indices.push_back(evidence.source_sample_index);
+            cell.measure_area_sum += evidence.measure_area;
 
             const ChVector3d rel = evidence.seed_world - patch_origin_world;
             const ChVector2d uv(Vdot(rel, tangent_u), Vdot(rel, tangent_v));
             cell.center_uv += uv * evidence.measure_area;
+
+            ChSDFPatchPlaneLayerSample layer_sample;
+            layer_sample.source_carrier_axis = evidence.source_carrier_axis;
+            layer_sample.source_coord = evidence.source_coord;
+            layer_sample.point_world = evidence.point_world;
+            layer_sample.seed_world = evidence.seed_world;
+            layer_sample.normal_world = evidence.normal_world;
+            layer_sample.measure_area = evidence.measure_area;
+            layer_sample.normal_depth = Vdot(evidence.seed_world - patch_origin_world, patch_normal_world);
+            layer_sample.source_sample_index = evidence.source_sample_index;
+            cell.samples.push_back(std::move(layer_sample));
         }
     }
 
-    support_cells.reserve(cell_map.size());
+    layered_cells.reserve(cell_map.size());
     for (auto& item : cell_map) {
         auto& cell = item.second;
-        if (cell.measure_area > 1.0e-16) {
-            cell.center_uv /= cell.measure_area;
+        if (cell.measure_area_sum > 1.0e-16) {
+            cell.center_uv /= cell.measure_area_sum;
+        }
+        std::stable_sort(cell.samples.begin(), cell.samples.end(), [](const auto& a, const auto& b) {
+            return a.normal_depth < b.normal_depth;
+        });
+        layered_cells.push_back(std::move(cell));
+    }
+
+    std::stable_sort(layered_cells.begin(), layered_cells.end(), [](const auto& a, const auto& b) {
+        if (a.carrier_axis != b.carrier_axis) {
+            return a.carrier_axis < b.carrier_axis;
+        }
+        return a.cell_ij.y() != b.cell_ij.y() ? a.cell_ij.y() < b.cell_ij.y() : a.cell_ij.x() < b.cell_ij.x();
+    });
+    return layered_cells;
+}
+
+std::vector<ChSDFPatchPlaneSupportCell> CollapseLayeredCellsToSheetCells(
+    const std::vector<ChSDFPatchPlaneLayeredCell>& layered_cells) {
+    std::vector<ChSDFPatchPlaneSupportCell> support_cells;
+    support_cells.reserve(layered_cells.size());
+
+    for (const auto& layered : layered_cells) {
+        ChSDFPatchPlaneSupportCell cell;
+        cell.carrier_axis = layered.carrier_axis;
+        cell.cell_ij = layered.cell_ij;
+        cell.center_uv = layered.center_uv;
+        cell.half_extents_uv = layered.half_extents_uv;
+        cell.measure_area = layered.measure_area_sum;
+        cell.layer_count = layered.samples.size();
+        cell.occupied = !layered.samples.empty();
+
+        ChVector3d representative_point_sum = VNULL;
+        ChVector3d representative_normal_sum = VNULL;
+        double point_weight_sum = 0;
+        for (const auto& sample : layered.samples) {
+            representative_point_sum += sample.seed_world * sample.measure_area;
+            representative_normal_sum += sample.normal_world * sample.measure_area;
+            point_weight_sum += sample.measure_area;
+            cell.source_sample_indices.push_back(sample.source_sample_index);
+        }
+        if (point_weight_sum > 1.0e-16) {
+            cell.representative_point_world = representative_point_sum / point_weight_sum;
+            cell.representative_normal_world = SafeNormalized(representative_normal_sum,
+                                                              layered.samples.front().normal_world);
         }
         std::sort(cell.source_sample_indices.begin(), cell.source_sample_indices.end());
         cell.source_sample_indices.erase(
             std::unique(cell.source_sample_indices.begin(), cell.source_sample_indices.end()),
             cell.source_sample_indices.end());
-
-        const SupportCellKey key{cell.carrier_axis, cell.cell_ij.x(), cell.cell_ij.y()};
-        const SupportCellKey neighbors[4] = {
-            {key.axis, key.u - 1, key.v}, {key.axis, key.u + 1, key.v}, {key.axis, key.u, key.v - 1}, {key.axis, key.u, key.v + 1}};
-        for (const auto& neighbor : neighbors) {
-            if (cell_map.find(neighbor) == cell_map.end()) {
-                cell.shell = true;
-                break;
-            }
-        }
-
         support_cells.push_back(std::move(cell));
     }
 
     std::stable_sort(support_cells.begin(), support_cells.end(), [](const auto& a, const auto& b) {
+        if (a.carrier_axis != b.carrier_axis) {
+            return a.carrier_axis < b.carrier_axis;
+        }
         return a.cell_ij.y() != b.cell_ij.y() ? a.cell_ij.y() < b.cell_ij.y() : a.cell_ij.x() < b.cell_ij.x();
     });
     return support_cells;
+}
+
+SheetCellTopologyStats AnnotateSupportSheetTopology(std::vector<ChSDFPatchPlaneSupportCell>& support_cells) {
+    SheetCellTopologyStats stats;
+    stats.layered_cell_count = support_cells.size();
+    if (support_cells.empty()) {
+        return stats;
+    }
+
+    std::unordered_map<SupportCellKey, std::size_t, SupportCellKeyHash> index_by_key;
+    index_by_key.reserve(support_cells.size());
+
+    int min_u = std::numeric_limits<int>::max();
+    int max_u = std::numeric_limits<int>::min();
+    int min_v = std::numeric_limits<int>::max();
+    int max_v = std::numeric_limits<int>::min();
+    std::size_t layer_sum = 0;
+
+    for (std::size_t i = 0; i < support_cells.size(); ++i) {
+        auto& cell = support_cells[i];
+        const SupportCellKey key{cell.carrier_axis, cell.cell_ij.x(), cell.cell_ij.y()};
+        index_by_key.emplace(key, i);
+        min_u = std::min(min_u, cell.cell_ij.x());
+        max_u = std::max(max_u, cell.cell_ij.x());
+        min_v = std::min(min_v, cell.cell_ij.y());
+        max_v = std::max(max_v, cell.cell_ij.y());
+        layer_sum += cell.layer_count;
+        stats.max_layer_count_per_cell = std::max(stats.max_layer_count_per_cell, cell.layer_count);
+        cell.shell = false;
+    }
+
+    stats.mean_layer_count_per_cell =
+        static_cast<double>(layer_sum) / static_cast<double>(support_cells.size());
+    const std::size_t bbox_count = static_cast<std::size_t>(max_u - min_u + 1) * static_cast<std::size_t>(max_v - min_v + 1);
+    if (bbox_count > 0) {
+        stats.fill_ratio = static_cast<double>(support_cells.size()) / static_cast<double>(bbox_count);
+    }
+
+    std::vector<char> visited(support_cells.size(), 0);
+    for (std::size_t i = 0; i < support_cells.size(); ++i) {
+        const auto& cell = support_cells[i];
+        const SupportCellKey key{cell.carrier_axis, cell.cell_ij.x(), cell.cell_ij.y()};
+        const SupportCellKey neighbors[4] = {
+            {key.axis, key.u - 1, key.v}, {key.axis, key.u + 1, key.v}, {key.axis, key.u, key.v - 1}, {key.axis, key.u, key.v + 1}};
+
+        std::size_t neighbor_count = 0;
+        for (const auto& neighbor : neighbors) {
+            if (index_by_key.find(neighbor) != index_by_key.end()) {
+                ++neighbor_count;
+            }
+        }
+        support_cells[i].shell = neighbor_count < 4;
+
+        if (visited[i]) {
+            continue;
+        }
+
+        std::size_t component_size = 0;
+        std::queue<std::size_t> frontier;
+        frontier.push(i);
+        visited[i] = 1;
+        while (!frontier.empty()) {
+            const auto current = frontier.front();
+            frontier.pop();
+            ++component_size;
+
+            const auto& current_cell = support_cells[current];
+            const SupportCellKey current_key{current_cell.carrier_axis, current_cell.cell_ij.x(), current_cell.cell_ij.y()};
+            const SupportCellKey current_neighbors[4] = {{current_key.axis, current_key.u - 1, current_key.v},
+                                                         {current_key.axis, current_key.u + 1, current_key.v},
+                                                         {current_key.axis, current_key.u, current_key.v - 1},
+                                                         {current_key.axis, current_key.u, current_key.v + 1}};
+            for (const auto& neighbor : current_neighbors) {
+                const auto it = index_by_key.find(neighbor);
+                if (it == index_by_key.end() || visited[it->second]) {
+                    continue;
+                }
+                visited[it->second] = 1;
+                frontier.push(it->second);
+            }
+        }
+
+        stats.largest_connected_sheet_cells = std::max(stats.largest_connected_sheet_cells, component_size);
+    }
+
+    return stats;
 }
 
 ChSDFSheetLocalFootprint MakeSquareFootprint(const ChVector3d& origin_world,
@@ -774,6 +921,11 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
     patch.support_footprint = ChSDFSheetLocalFootprint();
+    patch.layered_cell_count = 0;
+    patch.max_layer_count_per_cell = 0;
+    patch.largest_connected_sheet_cells = 0;
+    patch.mean_layer_count_per_cell = 0;
+    patch.sheet_fill_ratio = 0;
     patch.support_cells.clear();
 
     if (patch.sample_indices.empty()) {
@@ -828,8 +980,15 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, samples[patch.sample_indices.front()].normal_world);
-    patch.support_cells =
-        BuildPatchPlaneSupportCells(patch, samples, patch.centroid_world, patch.mean_normal_world, sheet_scale);
+    const auto layered_cells =
+        BuildPatchPlaneLayeredCells(patch, samples, patch.centroid_world, patch.mean_normal_world, sheet_scale);
+    patch.support_cells = CollapseLayeredCellsToSheetCells(layered_cells);
+    const auto topology_stats = AnnotateSupportSheetTopology(patch.support_cells);
+    patch.layered_cell_count = topology_stats.layered_cell_count;
+    patch.max_layer_count_per_cell = topology_stats.max_layer_count_per_cell;
+    patch.largest_connected_sheet_cells = topology_stats.largest_connected_sheet_cells;
+    patch.mean_layer_count_per_cell = topology_stats.mean_layer_count_per_cell;
+    patch.sheet_fill_ratio = topology_stats.fill_ratio;
 
     const auto support_metrics = ComputeProjectedHullMetrics(support_points, patch.centroid_world, patch.mean_normal_world);
     const auto occupancy_metrics =

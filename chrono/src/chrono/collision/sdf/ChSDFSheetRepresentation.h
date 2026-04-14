@@ -106,17 +106,42 @@ struct ChApi ChSDFSheetSupportEvidence {
     std::size_t source_sample_index = 0;
 };
 
-/// One discrete support cell on the local patch plane built from raw support evidence.
+/// One raw support-layer sample assigned to a unique patch-plane lattice site.
+struct ChApi ChSDFPatchPlaneLayerSample {
+    int source_carrier_axis = -1;
+    ChVector3i source_coord = ChVector3i(0, 0, 0);
+    ChVector3d point_world = VNULL;
+    ChVector3d seed_world = VNULL;
+    ChVector3d normal_world = VNULL;
+    double measure_area = 0;
+    double normal_depth = 0;
+    std::size_t source_sample_index = 0;
+};
+
+/// One layered occupancy container before collapsing to a single sheet cell.
+struct ChApi ChSDFPatchPlaneLayeredCell {
+    int carrier_axis = -1;
+    ChVector2i cell_ij = ChVector2i(0, 0);
+    ChVector2d center_uv = ChVector2d(0, 0);
+    ChVector2d half_extents_uv = ChVector2d(0, 0);
+    double measure_area_sum = 0;
+    std::vector<ChSDFPatchPlaneLayerSample> samples;
+};
+
+/// One discrete support-sheet cell on the local patch plane built from raw support evidence.
 struct ChApi ChSDFPatchPlaneSupportCell {
     int carrier_axis = -1;
     ChVector2i cell_ij = ChVector2i(0, 0);
     ChVector2d center_uv = ChVector2d(0, 0);
     ChVector2d half_extents_uv = ChVector2d(0, 0);
     double measure_area = 0;
+    std::size_t layer_count = 0;
     bool occupied = false;
     bool first_layer = true;
     bool shell = false;
 
+    ChVector3d representative_point_world = VNULL;
+    ChVector3d representative_normal_world = VNULL;
     std::vector<std::size_t> source_sample_indices;
 };
 
@@ -167,6 +192,11 @@ struct ChApi ChSDFSheetPatch {
     ChAABB support_bbox_world;
     ChSDFSheetLocalFootprint support_footprint;
 
+    std::size_t layered_cell_count = 0;
+    std::size_t max_layer_count_per_cell = 0;
+    std::size_t largest_connected_sheet_cells = 0;
+    double mean_layer_count_per_cell = 0;
+    double sheet_fill_ratio = 0;
     std::vector<ChSDFPatchPlaneSupportCell> support_cells;
     std::vector<std::size_t> sample_indices;
 
