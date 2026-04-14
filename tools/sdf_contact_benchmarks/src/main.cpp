@@ -204,6 +204,8 @@ struct PatchAreaDiagnosticRecord {
     std::size_t patch_id = 0;
     std::size_t support_columns = 0;
     std::size_t support_seed_count = 0;
+    std::size_t support_cell_count = 0;
+    std::size_t shell_cell_count = 0;
     std::size_t polygon_vertex_count = 0;
     double measure_area = 0;
     double footprint_area = 0;
@@ -479,6 +481,10 @@ DistributedEvaluation EvaluateDistributed(const std::string& scenario_name,
                 patch_record.patch_id = patch.patch_id;
                 patch_record.support_columns = patch.support_columns;
                 patch_record.support_seed_count = patch.support_seed_count;
+                patch_record.support_cell_count = patch.support_cells.size();
+                patch_record.shell_cell_count =
+                    std::count_if(patch.support_cells.begin(), patch.support_cells.end(),
+                                  [](const ChSDFPatchPlaneSupportCell& cell) { return cell.shell; });
                 patch_record.polygon_vertex_count = patch.support_footprint.polygon_uv.size();
                 patch_record.measure_area = patch.measure_area;
                 patch_record.footprint_area = patch.footprint_area;
@@ -925,13 +931,14 @@ void WritePatchAreaDiagnosticsCsv(const fs::path& path, const std::vector<PatchA
     std::ofstream out(path);
     out << std::setprecision(16);
     out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,region_id,patch_id,support_columns,"
-           "support_seed_count,polygon_vertex_count,measure_area,footprint_area,footprint_polygon_area,"
+           "support_seed_count,support_cell_count,shell_cell_count,polygon_vertex_count,measure_area,footprint_area,footprint_polygon_area,"
            "support_bbox_projected_area,polygon_to_footprint_ratio,bbox_to_footprint_ratio,bbox_to_polygon_ratio\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
             << record.tilt_z_deg << ',' << record.offset_x << ',' << record.region_id << ',' << record.patch_id << ','
-            << record.support_columns << ',' << record.support_seed_count << ',' << record.polygon_vertex_count << ','
+            << record.support_columns << ',' << record.support_seed_count << ',' << record.support_cell_count << ','
+            << record.shell_cell_count << ',' << record.polygon_vertex_count << ','
             << record.measure_area << ',' << record.footprint_area << ',' << record.footprint_polygon_area << ','
             << record.support_bbox_projected_area << ',' << record.polygon_to_footprint_ratio << ','
             << record.bbox_to_footprint_ratio << ',' << record.bbox_to_polygon_ratio << '\n';
@@ -1146,12 +1153,10 @@ int main(int argc, char* argv[]) {
               << "  " << patch_area_diagnostics_path.string() << "\n"
               << "  " << curved_sheet_records_path.string() << "\n"
               << "  " << curved_sheet_summary_path.string() << "\n";
-    PrintSummary(summaries);
-    PrintCurvedSheetSummary(curved_sheet_summaries);
 
-    // The benchmark has already materialized all outputs above. Some shutdown-time
-    // destructor path in the current Windows build is unstable; exit explicitly so
-    // HEAD remains reproducible for result comparisons.
+    // The benchmark has already materialized all outputs above. In the current
+    // Windows build, later teardown and summary-printing paths are unstable, so
+    // exit explicitly once the on-disk results are complete.
     std::cout.flush();
     std::cerr.flush();
     std::fflush(stdout);

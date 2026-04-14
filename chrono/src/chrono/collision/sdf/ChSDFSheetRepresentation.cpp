@@ -279,6 +279,7 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
     patch.support_footprint = ChSDFSheetLocalFootprint();
+    patch.support_cells.clear();
 
     if (patch.sample_indices.empty()) {
         return;
@@ -486,6 +487,68 @@ ProjectedHullMetrics ComputeProjectedHullMetrics(const std::vector<ChVector3d>& 
     return metrics;
 }
 
+std::vector<ChSDFPatchPlaneSupportCell> BuildPatchPlaneSupportCells(const ChSDFSheetPatch& patch,
+                                                                   const std::vector<ChSDFSheetFiberSample>& samples,
+                                                                   const ChVector3d& patch_origin_world,
+                                                                   const ChVector3d& patch_normal_world,
+                                                                   double cell_size) {
+    std::vector<ChSDFPatchPlaneSupportCell> support_cells;
+    if (patch.sample_indices.empty() || cell_size <= 1.0e-12) {
+        return support_cells;
+    }
+
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(patch_normal_world, tangent_u, tangent_v);
+
+    std::unordered_map<FiberKey, ChSDFPatchPlaneSupportCell, FiberKeyHash> cell_map;
+    cell_map.reserve(patch.sample_indices.size() * 4);
+
+    for (const auto sample_index : patch.sample_indices) {
+        const auto& sample = samples[sample_index];
+        for (const auto& evidence : sample.support_evidence) {
+            const ChVector3d rel = evidence.seed_world - patch_origin_world;
+            const double u = Vdot(rel, tangent_u);
+            const double v = Vdot(rel, tangent_v);
+            const FiberKey key{static_cast<int>(std::llround(u / cell_size)),
+                               static_cast<int>(std::llround(v / cell_size))};
+
+            auto& cell = cell_map[key];
+            cell.cell_ij = ChVector2i(key.a, key.b);
+            cell.center_uv = ChVector2d(key.a * cell_size, key.b * cell_size);
+            cell.half_extents_uv = ChVector2d(0.5 * cell_size, 0.5 * cell_size);
+            cell.measure_area += evidence.measure_area;
+            cell.occupied = true;
+            cell.source_sample_indices.push_back(evidence.source_sample_index);
+        }
+    }
+
+    support_cells.reserve(cell_map.size());
+    for (auto& item : cell_map) {
+        auto& cell = item.second;
+        std::sort(cell.source_sample_indices.begin(), cell.source_sample_indices.end());
+        cell.source_sample_indices.erase(
+            std::unique(cell.source_sample_indices.begin(), cell.source_sample_indices.end()),
+            cell.source_sample_indices.end());
+
+        const FiberKey key{cell.cell_ij.x(), cell.cell_ij.y()};
+        const FiberKey neighbors[4] = {{key.a - 1, key.b}, {key.a + 1, key.b}, {key.a, key.b - 1}, {key.a, key.b + 1}};
+        for (const auto& neighbor : neighbors) {
+            if (cell_map.find(neighbor) == cell_map.end()) {
+                cell.shell = true;
+                break;
+            }
+        }
+
+        support_cells.push_back(std::move(cell));
+    }
+
+    std::stable_sort(support_cells.begin(), support_cells.end(), [](const auto& a, const auto& b) {
+        return a.cell_ij.y() != b.cell_ij.y() ? a.cell_ij.y() < b.cell_ij.y() : a.cell_ij.x() < b.cell_ij.x();
+    });
+    return support_cells;
+}
+
 ChSDFSheetLocalFootprint MakeSquareFootprint(const ChVector3d& origin_world,
                                              const ChVector3d& normal_world,
                                              double target_area) {
@@ -673,6 +736,7 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
     patch.support_footprint = ChSDFSheetLocalFootprint();
+    patch.support_cells.clear();
 
     if (patch.sample_indices.empty()) {
         return;
@@ -726,6 +790,8 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, samples[patch.sample_indices.front()].normal_world);
+    patch.support_cells =
+        BuildPatchPlaneSupportCells(patch, samples, patch.centroid_world, patch.mean_normal_world, sheet_scale);
 
     const auto support_metrics = ComputeProjectedHullMetrics(support_points, patch.centroid_world, patch.mean_normal_world);
     const auto occupancy_metrics =
@@ -1047,6 +1113,7 @@ ChSDFSheetSeed BuildSeed(const ChSDFBrickPairWrenchSample& sample,
 
     seed.region_id = region_id;
     seed.source_sample_index = sample_index;
+    seed.source_coord = sample.region_sample.coord;
     seed.band_point_world = sample.region_sample.point_world;
     seed.seed_world = seed.band_point_world;
     seed.seed_normal_world = seed_normal;
@@ -1211,6 +1278,9 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
         sample.source_bounds_world += seed.band_point_world;
         sample.source_sample_indices.push_back(seed.source_sample_index);
         sample.support_seed_count++;
+        sample.support_evidence.push_back(
+            ChSDFSheetSupportEvidence{seed.source_coord, seed.band_point_world, seed.seed_world, seed.seed_normal_world,
+                                      seed.measure_area, seed.source_sample_index});
         seed_points.push_back(seed.seed_world);
 
         const double pressure_weight = seed.force_world.Length();

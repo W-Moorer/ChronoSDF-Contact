@@ -65,6 +65,7 @@ struct ChApi ChSDFSheetSeed {
     std::size_t region_id = 0;
     std::size_t source_sample_index = 0;
 
+    ChVector3i source_coord = ChVector3i(0, 0, 0);
     ChVector3d seed_world = VNULL;
     ChVector3d seed_normal_world = VNULL;
     ChVector3d band_point_world = VNULL;
@@ -93,6 +94,29 @@ struct ChApi ChSDFSheetLocalFootprint {
     bool HasPolygon() const { return polygon_uv.size() >= 3 && area > 1.0e-16; }
 };
 
+/// One raw support witness retained before patch-level footprint reconstruction.
+struct ChApi ChSDFSheetSupportEvidence {
+    ChVector3i source_coord = ChVector3i(0, 0, 0);
+    ChVector3d point_world = VNULL;
+    ChVector3d seed_world = VNULL;
+    ChVector3d normal_world = VNULL;
+    double measure_area = 0;
+    std::size_t source_sample_index = 0;
+};
+
+/// One discrete support cell on the local patch plane built from raw support evidence.
+struct ChApi ChSDFPatchPlaneSupportCell {
+    ChVector2i cell_ij = ChVector2i(0, 0);
+    ChVector2d center_uv = ChVector2d(0, 0);
+    ChVector2d half_extents_uv = ChVector2d(0, 0);
+    double measure_area = 0;
+    bool occupied = false;
+    bool first_layer = true;
+    bool shell = false;
+
+    std::vector<std::size_t> source_sample_indices;
+};
+
 /// One collapsed sheet sample obtained by merging a unique fiber cluster of band seeds.
 struct ChApi ChSDFSheetFiberSample {
     std::size_t region_id = 0;
@@ -117,6 +141,7 @@ struct ChApi ChSDFSheetFiberSample {
     ChAABB support_bbox_world;
     ChSDFSheetLocalFootprint support_footprint;
 
+    std::vector<ChSDFSheetSupportEvidence> support_evidence;
     std::vector<std::size_t> source_sample_indices;
 
     bool HasSupport() const { return measure_area > 0; }
@@ -139,6 +164,7 @@ struct ChApi ChSDFSheetPatch {
     ChAABB support_bbox_world;
     ChSDFSheetLocalFootprint support_footprint;
 
+    std::vector<ChSDFPatchPlaneSupportCell> support_cells;
     std::vector<std::size_t> sample_indices;
 
     bool HasSamples() const { return !sample_indices.empty(); }
