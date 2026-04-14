@@ -313,6 +313,124 @@ std::array<ChVector3d, 8> BuildAABBCorners(const ChAABB& box) {
             ChVector3d(box.max.x(), box.max.y(), box.min.z()), ChVector3d(box.max.x(), box.max.y(), box.max.z())};
 }
 
+struct ProjectedHullMetrics {
+    double area = 0;
+    double perimeter = 0;
+    double min_u = 0;
+    double max_u = 0;
+    double min_v = 0;
+    double max_v = 0;
+    bool valid = false;
+};
+
+double Cross2D(const ChVector2d& a, const ChVector2d& b, const ChVector2d& c) {
+    const ChVector2d ab = b - a;
+    const ChVector2d ac = c - a;
+    return ab.x() * ac.y() - ab.y() * ac.x();
+}
+
+ProjectedHullMetrics ComputeProjectedHullMetrics(const std::vector<ChVector3d>& support_points,
+                                                 const ChVector3d& centroid_world,
+                                                 const ChVector3d& normal_world) {
+    ProjectedHullMetrics metrics;
+    if (support_points.empty()) {
+        return metrics;
+    }
+
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(normal_world, tangent_u, tangent_v);
+
+    std::vector<ChVector2d> projected;
+    projected.reserve(support_points.size());
+
+    metrics.min_u = std::numeric_limits<double>::infinity();
+    metrics.max_u = -std::numeric_limits<double>::infinity();
+    metrics.min_v = std::numeric_limits<double>::infinity();
+    metrics.max_v = -std::numeric_limits<double>::infinity();
+
+    for (const auto& point : support_points) {
+        const ChVector3d rel = point - centroid_world;
+        const double u = Vdot(rel, tangent_u);
+        const double v = Vdot(rel, tangent_v);
+        projected.emplace_back(u, v);
+        metrics.min_u = std::min(metrics.min_u, u);
+        metrics.max_u = std::max(metrics.max_u, u);
+        metrics.min_v = std::min(metrics.min_v, v);
+        metrics.max_v = std::max(metrics.max_v, v);
+    }
+
+    std::sort(projected.begin(), projected.end(), [](const ChVector2d& a, const ChVector2d& b) {
+        return a.x() != b.x() ? a.x() < b.x() : a.y() < b.y();
+    });
+    projected.erase(std::unique(projected.begin(), projected.end(),
+                                [](const ChVector2d& a, const ChVector2d& b) {
+                                    return std::abs(a.x() - b.x()) <= 1.0e-12 && std::abs(a.y() - b.y()) <= 1.0e-12;
+                                }),
+                    projected.end());
+
+    if (projected.size() == 1) {
+        metrics.valid = true;
+        return metrics;
+    }
+
+    std::vector<ChVector2d> hull;
+    hull.reserve(projected.size() * 2);
+
+    for (const auto& point : projected) {
+        while (hull.size() >= 2 && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], point) <= 0) {
+            hull.pop_back();
+        }
+        hull.push_back(point);
+    }
+
+    const std::size_t lower_size = hull.size();
+    for (auto it = projected.rbegin() + 1; it != projected.rend(); ++it) {
+        while (hull.size() > lower_size && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], *it) <= 0) {
+            hull.pop_back();
+        }
+        hull.push_back(*it);
+    }
+
+    if (hull.size() > 1) {
+        hull.pop_back();
+    }
+
+    if (hull.empty()) {
+        return metrics;
+    }
+
+    if (hull.size() == 1) {
+        metrics.valid = true;
+        return metrics;
+    }
+
+    double twice_area = 0;
+    double perimeter = 0;
+    for (std::size_t i = 0; i < hull.size(); ++i) {
+        const auto& a = hull[i];
+        const auto& b = hull[(i + 1) % hull.size()];
+        twice_area += a.x() * b.y() - a.y() * b.x();
+        perimeter += (b - a).Length();
+    }
+
+    metrics.area = 0.5 * std::abs(twice_area);
+    metrics.perimeter = perimeter;
+    metrics.valid = true;
+    return metrics;
+}
+
+double ResolvePatchRecoveryRadius(double patch_measure_area, std::size_t support_seed_count, double sheet_scale) {
+    double radius = sheet_scale > 0 ? sheet_scale : 0.0;
+    if (support_seed_count > 0 && patch_measure_area > 0) {
+        radius = std::sqrt(patch_measure_area / static_cast<double>(support_seed_count));
+    }
+    if (sheet_scale > 0) {
+        radius = std::max(0.5 * sheet_scale, std::min(radius, 1.5 * sheet_scale));
+    }
+    return std::max(radius, 0.0);
+}
+
 void ExpandProjectedSupportBBox(ChAABB& bbox,
                                 const ChVector3d& centroid_world,
                                 const ChVector3d& normal_world,
@@ -374,7 +492,9 @@ void ExpandProjectedSupportBBox(ChAABB& bbox,
     }
 }
 
-void FinalizeV2Patch(ChSDFSheetPatch& patch, const std::vector<ChSDFSheetFiberSample>& samples) {
+void FinalizeV2Patch(ChSDFSheetPatch& patch,
+                     const std::vector<ChSDFSheetFiberSample>& samples,
+                     double sheet_scale) {
     patch.support_columns = patch.sample_indices.size();
     patch.support_seed_count = 0;
     patch.measure_area = 0;
@@ -394,7 +514,9 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch, const std::vector<ChSDFSheetFiberSa
     ChVector3d pressure_center_sum = VNULL;
     double pressure_weight_sum = 0;
     std::vector<ChVector3d> support_points;
+    std::vector<ChVector3d> occupancy_points;
     support_points.reserve(patch.sample_indices.size() * 8);
+    occupancy_points.reserve(patch.sample_indices.size() * 8);
 
     for (const auto sample_index : patch.sample_indices) {
         const auto& sample = samples[sample_index];
@@ -409,8 +531,14 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch, const std::vector<ChSDFSheetFiberSa
         if (!sample.support_bbox_world.IsInverted()) {
             const auto corners = BuildAABBCorners(sample.support_bbox_world);
             support_points.insert(support_points.end(), corners.begin(), corners.end());
-        } else {
+        }
+        if (!sample.source_bounds_world.IsInverted()) {
+            const auto source_corners = BuildAABBCorners(sample.source_bounds_world);
+            occupancy_points.insert(occupancy_points.end(), source_corners.begin(), source_corners.end());
+        }
+        if (sample.support_bbox_world.IsInverted() && sample.source_bounds_world.IsInverted()) {
             support_points.push_back(sample.centroid_world);
+            occupancy_points.push_back(sample.centroid_world);
         }
 
         const double pressure_weight = sample.force_world.Length();
@@ -425,8 +553,85 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch, const std::vector<ChSDFSheetFiberSa
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, samples[patch.sample_indices.front()].normal_world);
 
-    ExpandProjectedSupportBBox(patch.support_bbox_world, patch.centroid_world, patch.mean_normal_world, support_points,
-                               std::max(patch.footprint_area, patch.measure_area));
+    const auto support_metrics = ComputeProjectedHullMetrics(support_points, patch.centroid_world, patch.mean_normal_world);
+    const auto occupancy_metrics =
+        ComputeProjectedHullMetrics(occupancy_points, patch.centroid_world, patch.mean_normal_world);
+    const double base_recovery_radius =
+        ResolvePatchRecoveryRadius(patch.measure_area, patch.support_seed_count, sheet_scale);
+
+    double recovered_area = patch.measure_area;
+    double recovery_radius_u = base_recovery_radius;
+    double recovery_radius_v = base_recovery_radius;
+    double min_u = 0;
+    double max_u = 0;
+    double min_v = 0;
+    double max_v = 0;
+    if (support_metrics.valid || occupancy_metrics.valid) {
+        const auto& primary_metrics = support_metrics.valid ? support_metrics : occupancy_metrics;
+        min_u = primary_metrics.min_u;
+        max_u = primary_metrics.max_u;
+        min_v = primary_metrics.min_v;
+        max_v = primary_metrics.max_v;
+
+        const double primary_span_u = std::max(primary_metrics.max_u - primary_metrics.min_u, 0.0);
+        const double primary_span_v = std::max(primary_metrics.max_v - primary_metrics.min_v, 0.0);
+        const bool u_major_primary = primary_span_u >= primary_span_v;
+        const double primary_minor = std::max(std::min(primary_span_u, primary_span_v), 1.0e-12);
+        const double primary_major = std::max(primary_span_u, primary_span_v);
+        const double primary_aspect = primary_major / primary_minor;
+
+        if (support_metrics.valid && occupancy_metrics.valid && primary_aspect > 1.25) {
+            if (u_major_primary) {
+                min_v = std::min(min_v, occupancy_metrics.min_v);
+                max_v = std::max(max_v, occupancy_metrics.max_v);
+            } else {
+                min_u = std::min(min_u, occupancy_metrics.min_u);
+                max_u = std::max(max_u, occupancy_metrics.max_u);
+            }
+        }
+
+        const double span_u = std::max(max_u - min_u, 0.0);
+        const double span_v = std::max(max_v - min_v, 0.0);
+        const double minor_span = std::max(std::min(span_u, span_v), 1.0e-12);
+        const double major_span = std::max(span_u, span_v);
+        const double aspect_ratio = major_span / minor_span;
+        const double slenderness = std::max(0.0, std::min((aspect_ratio - 1.0) / 2.0, 1.0));
+        const double major_scale = 0.125;
+        const double minor_scale = 0.125 + 0.875 * slenderness;
+
+        if (span_u >= span_v) {
+            recovery_radius_u = major_scale * base_recovery_radius;
+            recovery_radius_v = minor_scale * base_recovery_radius;
+        } else {
+            recovery_radius_u = minor_scale * base_recovery_radius;
+            recovery_radius_v = major_scale * base_recovery_radius;
+        }
+
+        const double core_area = support_metrics.valid ? support_metrics.area : occupancy_metrics.area;
+        recovered_area = core_area + 2.0 * recovery_radius_u * span_v + 2.0 * recovery_radius_v * span_u +
+                         CH_PI * recovery_radius_u * recovery_radius_v;
+    } else if (base_recovery_radius > 0) {
+        recovered_area = CH_PI * base_recovery_radius * base_recovery_radius;
+    }
+    patch.footprint_area = std::max(recovered_area, patch.measure_area);
+
+    patch.support_bbox_world = ChAABB();
+    if (support_metrics.valid || occupancy_metrics.valid) {
+        ChVector3d tangent_u;
+        ChVector3d tangent_v;
+        BuildOrthonormalBasis(patch.mean_normal_world, tangent_u, tangent_v);
+        const std::array<ChVector3d, 4> corners = {
+            patch.centroid_world + tangent_u * (min_u - recovery_radius_u) + tangent_v * (min_v - recovery_radius_v),
+            patch.centroid_world + tangent_u * (min_u - recovery_radius_u) + tangent_v * (max_v + recovery_radius_v),
+            patch.centroid_world + tangent_u * (max_u + recovery_radius_u) + tangent_v * (min_v - recovery_radius_v),
+            patch.centroid_world + tangent_u * (max_u + recovery_radius_u) + tangent_v * (max_v + recovery_radius_v)};
+        for (const auto& corner : corners) {
+            patch.support_bbox_world += corner;
+        }
+    } else {
+        ExpandProjectedSupportBBox(patch.support_bbox_world, patch.centroid_world, patch.mean_normal_world, support_points,
+                                   std::max(patch.footprint_area, patch.measure_area));
+    }
 }
 
 bool PatchesBelongTogether(const ChSDFSheetPatch& a,
@@ -466,6 +671,7 @@ bool PatchesBelongTogether(const ChSDFSheetPatch& a,
 
 std::vector<ChSDFSheetPatch> MergeV2Patches(const std::vector<ChSDFSheetPatch>& input_patches,
                                             const std::vector<ChSDFSheetFiberSample>& samples,
+                                            double sheet_scale,
                                             double patch_connection_radius,
                                             double patch_normal_cosine) {
     if (input_patches.size() <= 1) {
@@ -498,7 +704,7 @@ std::vector<ChSDFSheetPatch> MergeV2Patches(const std::vector<ChSDFSheetPatch>& 
         ChSDFSheetPatch patch;
         patch.patch_id = merged_patches.size();
         patch.sample_indices = std::move(indices);
-        FinalizeV2Patch(patch, samples);
+        FinalizeV2Patch(patch, samples, sheet_scale);
         merged_patches.push_back(std::move(patch));
     }
 
@@ -897,6 +1103,7 @@ bool FibersBelongToSamePatch(const ChSDFSheetFiberSample& a,
 }
 
 std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSample>& samples,
+                                             double sheet_scale,
                                              double patch_connection_radius,
                                              double patch_normal_cosine) {
     std::vector<ChSDFSheetPatch> patches;
@@ -957,11 +1164,11 @@ std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSa
         ChSDFSheetPatch patch;
         patch.patch_id = patches.size();
         patch.sample_indices = std::move(indices);
-        FinalizeV2Patch(patch, samples);
+        FinalizeV2Patch(patch, samples, sheet_scale);
         patches.push_back(std::move(patch));
     }
 
-    patches = MergeV2Patches(patches, samples, patch_connection_radius, patch_normal_cosine);
+    patches = MergeV2Patches(patches, samples, sheet_scale, patch_connection_radius, patch_normal_cosine);
     std::stable_sort(patches.begin(), patches.end(),
                      [](const ChSDFSheetPatch& a, const ChSDFSheetPatch& b) { return a.patch_id < b.patch_id; });
     return patches;
@@ -1242,13 +1449,17 @@ ChSDFSheetRegion BuildRegionV2(const ChSDFBrickPairWrenchResult& band_region,
     region.mean_support_seed_count =
         static_cast<double>(support_seed_sum) / static_cast<double>(region.samples.size());
     region.normal_spread = ComputeNormalSpread(region.samples, region.mean_normal_world);
-    region.patches = BuildPatchGraph(region.samples, ResolvePatchConnectionRadius(band_region, settings),
-                                     settings.patch_normal_cosine);
+    const double sheet_scale = ResolveSheetScale(band_region, settings);
+    region.patches =
+        BuildPatchGraph(region.samples, sheet_scale, ResolvePatchConnectionRadius(band_region, settings),
+                        settings.patch_normal_cosine);
     region.patch_count = region.patches.size();
     region.largest_patch_area = 0;
     region.support_bbox_world = ChAABB();
+    region.footprint_area = 0;
     for (const auto& patch : region.patches) {
-        region.largest_patch_area = std::max(region.largest_patch_area, patch.measure_area);
+        region.largest_patch_area = std::max(region.largest_patch_area, patch.footprint_area);
+        region.footprint_area += patch.footprint_area;
         region.support_bbox_world += patch.support_bbox_world;
     }
 
