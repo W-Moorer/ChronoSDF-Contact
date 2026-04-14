@@ -13,6 +13,7 @@
 #include "chrono/collision/sdf/ChSDFSheetRepresentation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -54,6 +55,8 @@ struct SpatialHashKeyHash {
         return hx * 73856093u ^ hy * 19349663u ^ hz * 83492791u;
     }
 };
+
+double AABBDistance(const ChAABB& a, const ChAABB& b);
 
 struct LegacyFiberAccumulator {
     int dominant_axis = -1;
@@ -288,7 +291,7 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
         centroid_sum += sample.centroid_world * sample.measure_area;
         normal_sum += sample.normal_world * sample.measure_area;
         patch.bounds_world += sample.centroid_world;
-        patch.support_bbox_world += sample.centroid_world;
+        patch.support_bbox_world += sample.support_bbox_world;
 
         const double pressure_weight = sample.force_world.Length();
         pressure_weight_sum += pressure_weight;
@@ -301,6 +304,207 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
     patch.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, fallback_normal);
+}
+
+std::array<ChVector3d, 8> BuildAABBCorners(const ChAABB& box) {
+    return {ChVector3d(box.min.x(), box.min.y(), box.min.z()), ChVector3d(box.min.x(), box.min.y(), box.max.z()),
+            ChVector3d(box.min.x(), box.max.y(), box.min.z()), ChVector3d(box.min.x(), box.max.y(), box.max.z()),
+            ChVector3d(box.max.x(), box.min.y(), box.min.z()), ChVector3d(box.max.x(), box.min.y(), box.max.z()),
+            ChVector3d(box.max.x(), box.max.y(), box.min.z()), ChVector3d(box.max.x(), box.max.y(), box.max.z())};
+}
+
+void ExpandProjectedSupportBBox(ChAABB& bbox,
+                                const ChVector3d& centroid_world,
+                                const ChVector3d& normal_world,
+                                const std::vector<ChVector3d>& support_points,
+                                double target_area) {
+    if (support_points.empty() || target_area <= 1.0e-16) {
+        return;
+    }
+
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(normal_world, tangent_u, tangent_v);
+
+    double min_u = std::numeric_limits<double>::infinity();
+    double max_u = -std::numeric_limits<double>::infinity();
+    double min_v = std::numeric_limits<double>::infinity();
+    double max_v = -std::numeric_limits<double>::infinity();
+
+    for (const auto& point : support_points) {
+        const ChVector3d rel = point - centroid_world;
+        const double u = Vdot(rel, tangent_u);
+        const double v = Vdot(rel, tangent_v);
+        min_u = std::min(min_u, u);
+        max_u = std::max(max_u, u);
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    }
+
+    double half_u = 0.5 * (std::isfinite(min_u) ? std::max(max_u - min_u, 0.0) : 0.0);
+    double half_v = 0.5 * (std::isfinite(min_v) ? std::max(max_v - min_v, 0.0) : 0.0);
+    const double center_u = std::isfinite(min_u) && std::isfinite(max_u) ? 0.5 * (min_u + max_u) : 0.0;
+    const double center_v = std::isfinite(min_v) && std::isfinite(max_v) ? 0.5 * (min_v + max_v) : 0.0;
+    const double min_half = std::sqrt(target_area / CH_PI);
+
+    if (half_u <= 1.0e-12 && half_v <= 1.0e-12) {
+        half_u = min_half;
+        half_v = min_half;
+    } else {
+        const double full_u = std::max(2.0 * half_u, 1.0e-12);
+        const double full_v = std::max(2.0 * half_v, 1.0e-12);
+        const double observed_rect_area = full_u * full_v;
+        const double required_area = std::max(target_area, observed_rect_area);
+
+        if (full_u >= full_v) {
+            half_v = std::max(half_v, 0.5 * required_area / full_u);
+        } else {
+            half_u = std::max(half_u, 0.5 * required_area / full_v);
+        }
+    }
+
+    const ChVector3d rect_center = centroid_world + tangent_u * center_u + tangent_v * center_v;
+    const std::array<ChVector3d, 4> corners = {
+        rect_center + tangent_u * half_u + tangent_v * half_v,
+        rect_center + tangent_u * half_u - tangent_v * half_v,
+        rect_center - tangent_u * half_u + tangent_v * half_v,
+        rect_center - tangent_u * half_u - tangent_v * half_v};
+    for (const auto& corner : corners) {
+        bbox += corner;
+    }
+}
+
+void FinalizeV2Patch(ChSDFSheetPatch& patch, const std::vector<ChSDFSheetFiberSample>& samples) {
+    patch.support_columns = patch.sample_indices.size();
+    patch.support_seed_count = 0;
+    patch.measure_area = 0;
+    patch.footprint_area = 0;
+    patch.centroid_world = VNULL;
+    patch.pressure_center_world = VNULL;
+    patch.mean_normal_world = VNULL;
+    patch.bounds_world = ChAABB();
+    patch.support_bbox_world = ChAABB();
+
+    if (patch.sample_indices.empty()) {
+        return;
+    }
+
+    ChVector3d centroid_sum = VNULL;
+    ChVector3d normal_sum = VNULL;
+    ChVector3d pressure_center_sum = VNULL;
+    double pressure_weight_sum = 0;
+    std::vector<ChVector3d> support_points;
+    support_points.reserve(patch.sample_indices.size() * 8);
+
+    for (const auto sample_index : patch.sample_indices) {
+        const auto& sample = samples[sample_index];
+        patch.support_seed_count += sample.support_seed_count;
+        patch.measure_area += sample.measure_area;
+        patch.footprint_area += sample.footprint_area;
+        centroid_sum += sample.centroid_world * sample.measure_area;
+        normal_sum += sample.normal_world * sample.measure_area;
+        patch.bounds_world += sample.source_bounds_world;
+        patch.support_bbox_world += sample.support_bbox_world;
+
+        if (!sample.support_bbox_world.IsInverted()) {
+            const auto corners = BuildAABBCorners(sample.support_bbox_world);
+            support_points.insert(support_points.end(), corners.begin(), corners.end());
+        } else {
+            support_points.push_back(sample.centroid_world);
+        }
+
+        const double pressure_weight = sample.force_world.Length();
+        pressure_weight_sum += pressure_weight;
+        pressure_center_sum += sample.pressure_center_world * pressure_weight;
+    }
+
+    if (patch.measure_area > 0) {
+        patch.centroid_world = centroid_sum / patch.measure_area;
+    }
+    patch.pressure_center_world =
+        pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
+    patch.mean_normal_world = SafeNormalized(normal_sum, samples[patch.sample_indices.front()].normal_world);
+
+    ExpandProjectedSupportBBox(patch.support_bbox_world, patch.centroid_world, patch.mean_normal_world, support_points,
+                               std::max(patch.footprint_area, patch.measure_area));
+}
+
+bool PatchesBelongTogether(const ChSDFSheetPatch& a,
+                           const ChSDFSheetPatch& b,
+                           double patch_connection_radius,
+                           double patch_normal_cosine) {
+    const double cosine = NormalCosine(a.mean_normal_world, b.mean_normal_world);
+    if (patch_normal_cosine > -1 && cosine < std::min(patch_normal_cosine, std::cos(CH_PI / 4.0))) {
+        return false;
+    }
+
+    const double radius_a = a.footprint_area > 0 ? std::sqrt(a.footprint_area / CH_PI) : 0.0;
+    const double radius_b = b.footprint_area > 0 ? std::sqrt(b.footprint_area / CH_PI) : 0.0;
+    const double bbox_gap = AABBDistance(a.support_bbox_world, b.support_bbox_world);
+    if (bbox_gap <= patch_connection_radius + 0.25 * (radius_a + radius_b) + 1.0e-12) {
+        return true;
+    }
+
+    const ChVector3d n_bar = SafeNormalized(a.mean_normal_world + b.mean_normal_world, a.mean_normal_world);
+    const ChVector3d delta = b.centroid_world - a.centroid_world;
+    const double delta_n = std::abs(Vdot(n_bar, delta));
+    const double delta_t = (delta - n_bar * Vdot(n_bar, delta)).Length();
+
+    const double min_area = std::min(a.measure_area, b.measure_area);
+    const double max_area = std::max(a.measure_area, b.measure_area);
+    const bool small_fragment_bridge =
+        max_area > 0 && min_area <= 0.35 * max_area &&
+        bbox_gap <= 2.0 * patch_connection_radius + 0.5 * (radius_a + radius_b) + 1.0e-12 &&
+        delta_n <= patch_connection_radius + 0.25 * (radius_a + radius_b) + 1.0e-12;
+    if (small_fragment_bridge) {
+        return true;
+    }
+
+    return delta_t <= patch_connection_radius + radius_a + radius_b + 1.0e-12 &&
+           delta_n <= 0.5 * patch_connection_radius + 0.25 * (radius_a + radius_b) + 1.0e-12;
+}
+
+std::vector<ChSDFSheetPatch> MergeV2Patches(const std::vector<ChSDFSheetPatch>& input_patches,
+                                            const std::vector<ChSDFSheetFiberSample>& samples,
+                                            double patch_connection_radius,
+                                            double patch_normal_cosine) {
+    if (input_patches.size() <= 1) {
+        return input_patches;
+    }
+
+    UnionFind uf(input_patches.size());
+    for (std::size_t i = 0; i < input_patches.size(); ++i) {
+        for (std::size_t j = i + 1; j < input_patches.size(); ++j) {
+            if (PatchesBelongTogether(input_patches[i], input_patches[j], patch_connection_radius, patch_normal_cosine)) {
+                uf.Unite(i, j);
+            }
+        }
+    }
+
+    std::unordered_map<std::size_t, std::vector<std::size_t>> merged_indices;
+    merged_indices.reserve(input_patches.size());
+    for (std::size_t i = 0; i < input_patches.size(); ++i) {
+        auto& indices = merged_indices[uf.Find(i)];
+        indices.insert(indices.end(), input_patches[i].sample_indices.begin(), input_patches[i].sample_indices.end());
+    }
+
+    std::vector<ChSDFSheetPatch> merged_patches;
+    merged_patches.reserve(merged_indices.size());
+    for (auto& item : merged_indices) {
+        auto& indices = item.second;
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+
+        ChSDFSheetPatch patch;
+        patch.patch_id = merged_patches.size();
+        patch.sample_indices = std::move(indices);
+        FinalizeV2Patch(patch, samples);
+        merged_patches.push_back(std::move(patch));
+    }
+
+    std::stable_sort(merged_patches.begin(), merged_patches.end(),
+                     [](const ChSDFSheetPatch& a, const ChSDFSheetPatch& b) { return a.patch_id < b.patch_id; });
+    return merged_patches;
 }
 
 std::vector<ChSDFSheetPatch> BuildLegacyPatches(const std::vector<ChSDFSheetFiberSample>& samples,
@@ -546,6 +750,8 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
     ChVector3d force_sum = VNULL;
     double measure_area = 0;
     double pressure_weight_sum = 0;
+    std::vector<ChVector3d> seed_points;
+    seed_points.reserve(cluster.size());
 
     for (const auto seed_index : cluster) {
         const auto& seed = seeds[seed_index];
@@ -554,9 +760,9 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
         normal_sum += seed.seed_normal_world * seed.measure_area;
         force_sum += seed.force_world;
         sample.source_bounds_world += seed.band_point_world;
-        sample.support_bbox_world += seed.seed_world;
         sample.source_sample_indices.push_back(seed.source_sample_index);
         sample.support_seed_count++;
+        seed_points.push_back(seed.seed_world);
 
         const double pressure_weight = seed.force_world.Length();
         pressure_weight_sum += pressure_weight;
@@ -574,6 +780,63 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : sample.centroid_world;
     sample.normal_world = SafeNormalized(normal_sum, seeds[cluster.front()].seed_normal_world);
     sample.force_world = force_sum;
+
+    sample.support_bbox_world = ChAABB();
+    for (const auto& point : seed_points) {
+        sample.support_bbox_world += point;
+    }
+
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(sample.normal_world, tangent_u, tangent_v);
+
+    double min_u = std::numeric_limits<double>::infinity();
+    double max_u = -std::numeric_limits<double>::infinity();
+    double min_v = std::numeric_limits<double>::infinity();
+    double max_v = -std::numeric_limits<double>::infinity();
+
+    for (const auto& point : seed_points) {
+        const ChVector3d rel = point - sample.centroid_world;
+        const double u = Vdot(rel, tangent_u);
+        const double v = Vdot(rel, tangent_v);
+        min_u = std::min(min_u, u);
+        max_u = std::max(max_u, u);
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    }
+
+    const double span_u = std::isfinite(min_u) ? (max_u - min_u) : 0.0;
+    const double span_v = std::isfinite(min_v) ? (max_v - min_v) : 0.0;
+
+    double half_u = 0.5 * std::max(span_u, 0.0);
+    double half_v = 0.5 * std::max(span_v, 0.0);
+    const double min_half = std::sqrt(std::max(sample.measure_area, 0.0) / CH_PI);
+
+    if (half_u <= 1.0e-12 && half_v <= 1.0e-12) {
+        half_u = min_half;
+        half_v = min_half;
+    } else {
+        const double full_u = std::max(2.0 * half_u, 1.0e-12);
+        const double full_v = std::max(2.0 * half_v, 1.0e-12);
+        const double observed_rect_area = full_u * full_v;
+        const double target_area = std::max(sample.measure_area, observed_rect_area);
+
+        if (full_u >= full_v) {
+            half_v = std::max(half_v, 0.5 * target_area / full_u);
+        } else {
+            half_u = std::max(half_u, 0.5 * target_area / full_v);
+        }
+    }
+
+    const std::array<ChVector3d, 4> corners = {
+        sample.centroid_world + tangent_u * half_u + tangent_v * half_v,
+        sample.centroid_world + tangent_u * half_u - tangent_v * half_v,
+        sample.centroid_world - tangent_u * half_u + tangent_v * half_v,
+        sample.centroid_world - tangent_u * half_u - tangent_v * half_v};
+    for (const auto& corner : corners) {
+        sample.support_bbox_world += corner;
+    }
+
     return sample;
 }
 
@@ -694,38 +957,11 @@ std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSa
         ChSDFSheetPatch patch;
         patch.patch_id = patches.size();
         patch.sample_indices = std::move(indices);
-        patch.support_columns = patch.sample_indices.size();
-        patch.support_seed_count = 0;
-
-        ChVector3d centroid_sum = VNULL;
-        ChVector3d pressure_center_sum = VNULL;
-        ChVector3d normal_sum = VNULL;
-        double pressure_weight_sum = 0;
-
-        for (const auto sample_index : patch.sample_indices) {
-            const auto& sample = samples[sample_index];
-            patch.support_seed_count += sample.support_seed_count;
-            patch.measure_area += sample.measure_area;
-            patch.footprint_area += sample.footprint_area;
-            centroid_sum += sample.centroid_world * sample.measure_area;
-            normal_sum += sample.normal_world * sample.measure_area;
-            patch.bounds_world += sample.centroid_world;
-            patch.support_bbox_world += sample.centroid_world;
-
-            const double pressure_weight = sample.force_world.Length();
-            pressure_weight_sum += pressure_weight;
-            pressure_center_sum += sample.pressure_center_world * pressure_weight;
-        }
-
-        if (patch.measure_area > 0) {
-            patch.centroid_world = centroid_sum / patch.measure_area;
-        }
-        patch.pressure_center_world =
-            pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
-        patch.mean_normal_world = SafeNormalized(normal_sum);
+        FinalizeV2Patch(patch, samples);
         patches.push_back(std::move(patch));
     }
 
+    patches = MergeV2Patches(patches, samples, patch_connection_radius, patch_normal_cosine);
     std::stable_sort(patches.begin(), patches.end(),
                      [](const ChSDFSheetPatch& a, const ChSDFSheetPatch& b) { return a.patch_id < b.patch_id; });
     return patches;
@@ -904,7 +1140,7 @@ ChSDFSheetRegion BuildRegionLegacyDominantAxis(const ChSDFBrickPairWrenchResult&
         centroid_sum += sample.centroid_world * sample.measure_area;
         normal_sum += sample.normal_world * sample.measure_area;
         region.bounds_world += sample.source_bounds_world;
-        region.support_bbox_world += sample.centroid_world;
+        region.support_bbox_world += sample.support_bbox_world;
         support_seed_sum += sample.support_seed_count;
 
         const double region_pressure_weight = sample.force_world.Length();
@@ -983,7 +1219,7 @@ ChSDFSheetRegion BuildRegionV2(const ChSDFBrickPairWrenchResult& band_region,
         centroid_sum += sample.centroid_world * sample.measure_area;
         normal_sum += sample.normal_world * sample.measure_area;
         region.bounds_world += sample.source_bounds_world;
-        region.support_bbox_world += sample.centroid_world;
+        region.support_bbox_world += sample.support_bbox_world;
         support_seed_sum += sample.support_seed_count;
 
         const double region_pressure_weight = sample.force_world.Length();
@@ -1010,8 +1246,10 @@ ChSDFSheetRegion BuildRegionV2(const ChSDFBrickPairWrenchResult& band_region,
                                      settings.patch_normal_cosine);
     region.patch_count = region.patches.size();
     region.largest_patch_area = 0;
+    region.support_bbox_world = ChAABB();
     for (const auto& patch : region.patches) {
         region.largest_patch_area = std::max(region.largest_patch_area, patch.measure_area);
+        region.support_bbox_world += patch.support_bbox_world;
     }
 
     return region;
@@ -1124,8 +1362,8 @@ ChSDFSheetShapePairResult ChSDFSheetBuilder::BuildShapePair(const ChSDFShapePair
         support_seed_sum += sheet_region.mean_support_seed_count * static_cast<double>(sheet_region.samples.size());
 
         double region_pressure_weight = 0;
+        result.support_bbox_world += sheet_region.support_bbox_world;
         for (const auto& sample : sheet_region.samples) {
-            result.support_bbox_world += sample.centroid_world;
             region_pressure_weight += sample.force_world.Length();
         }
         pressure_weight_sum += region_pressure_weight;
