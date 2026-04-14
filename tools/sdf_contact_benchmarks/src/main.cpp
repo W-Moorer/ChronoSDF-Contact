@@ -94,6 +94,9 @@ struct BenchmarkRecord {
     double pressure_center_x = 0;
     double sheet_center_x = 0;
     double sheet_pressure_center_x = 0;
+    double sheet_area_ratio = 0;
+    double sheet_mean_support_seed_count = 0;
+    double sheet_normal_spread = 0;
     double sheet_support_bbox_xmin = 0;
     double sheet_support_bbox_xmax = 0;
     double sheet_support_bbox_zmin = 0;
@@ -103,6 +106,9 @@ struct BenchmarkRecord {
     std::size_t active_regions = 0;
     std::size_t active_samples = 0;
     std::size_t sheet_patch_count = 0;
+    std::size_t sheet_fiber_count = 0;
+    std::size_t sheet_fallback_regions = 0;
+    bool sheet_used_fallback = false;
 };
 
 struct BenchmarkSummary {
@@ -143,12 +149,18 @@ struct CurvedSheetRecord {
     double area_sheet = 0;
     double sheet_center_x = 0;
     double sheet_pressure_center_x = 0;
+    double sheet_area_ratio = 0;
+    double sheet_mean_support_seed_count = 0;
+    double sheet_normal_spread = 0;
     double sheet_support_bbox_xmin = 0;
     double sheet_support_bbox_xmax = 0;
     double sheet_support_bbox_zmin = 0;
     double sheet_support_bbox_zmax = 0;
     double eval_ms = 0;
     std::size_t sheet_patch_count = 0;
+    std::size_t sheet_fiber_count = 0;
+    std::size_t sheet_fallback_regions = 0;
+    bool sheet_used_fallback = false;
 };
 
 struct CurvedSheetSummary {
@@ -163,6 +175,11 @@ struct CurvedSheetSummary {
     double bbox_zmin_rmse = 0;
     double bbox_zmax_rmse = 0;
     double patch_count_rmse = 0;
+    double mean_area_ratio = 0;
+    double mean_support_seed_count = 0;
+    double mean_normal_spread = 0;
+    double mean_fiber_count = 0;
+    double fallback_ratio = 0;
 };
 
 double GridStep(std::size_t count, double half_length) {
@@ -328,7 +345,13 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
         record.area_sheet = result.sheet_result->sheet_footprint_area;
         record.sheet_center_x = result.sheet_result->sheet_center_world.x();
         record.sheet_pressure_center_x = result.sheet_result->pressure_center_world.x();
+        record.sheet_area_ratio = result.sheet_result->area_ratio;
+        record.sheet_mean_support_seed_count = result.sheet_result->mean_support_seed_count;
+        record.sheet_normal_spread = result.sheet_result->normal_spread;
         record.sheet_patch_count = result.sheet_result->patch_count;
+        record.sheet_fiber_count = result.sheet_result->fiber_count;
+        record.sheet_fallback_regions = result.sheet_result->fallback_regions;
+        record.sheet_used_fallback = result.sheet_result->used_fallback;
         if (!result.sheet_result->support_bbox_world.IsInverted()) {
             record.sheet_support_bbox_xmin = result.sheet_result->support_bbox_world.min.x();
             record.sheet_support_bbox_xmax = result.sheet_result->support_bbox_world.max.x();
@@ -361,12 +384,15 @@ std::vector<CurvedSheetRecord> EvaluateCurvedSheetModes(const std::string& scena
 
     struct SheetModeSpec {
         const char* name;
+        bool use_step6_v2;
         bool use_local_fiber_projection;
+        bool allow_fallback;
     };
 
-    const std::array<SheetModeSpec, 2> modes = {{
-        {"dominant_axis", false},
-        {"local_fiber", true},
+    const std::array<SheetModeSpec, 3> modes = {{
+        {"legacy_dominant_axis", false, false, false},
+        {"supplement5_v2_raw", true, false, false},
+        {"supplement5_v2_auto", true, false, true},
     }};
 
     std::vector<CurvedSheetRecord> records;
@@ -375,7 +401,11 @@ std::vector<CurvedSheetRecord> EvaluateCurvedSheetModes(const std::string& scena
     for (const auto& mode : modes) {
         auto settings = original_settings;
         settings.enable = true;
+        settings.use_step6_v2 = mode.use_step6_v2;
         settings.use_local_fiber_projection = mode.use_local_fiber_projection;
+        settings.allow_dominant_axis_fallback = mode.allow_fallback;
+        settings.max_patch_count_before_fallback = mode.allow_fallback ? 4 : 0;
+        settings.max_fiber_count_before_fallback = mode.allow_fallback ? 64 : 0;
 
         const auto start = std::chrono::steady_clock::now();
         const auto sheet = ChSDFSheetBuilder::BuildShapePair(band_result, settings);
@@ -392,7 +422,13 @@ std::vector<CurvedSheetRecord> EvaluateCurvedSheetModes(const std::string& scena
         record.area_sheet = sheet.sheet_footprint_area;
         record.sheet_center_x = sheet.sheet_center_world.x();
         record.sheet_pressure_center_x = sheet.pressure_center_world.x();
+        record.sheet_area_ratio = sheet.area_ratio;
+        record.sheet_mean_support_seed_count = sheet.mean_support_seed_count;
+        record.sheet_normal_spread = sheet.normal_spread;
         record.sheet_patch_count = sheet.patch_count;
+        record.sheet_fiber_count = sheet.fiber_count;
+        record.sheet_fallback_regions = sheet.fallback_regions;
+        record.sheet_used_fallback = sheet.used_fallback;
         record.eval_ms = std::chrono::duration<double, std::milli>(stop - start).count();
         if (!sheet.support_bbox_world.IsInverted()) {
             record.sheet_support_bbox_xmin = sheet.support_bbox_world.min.x();
@@ -483,16 +519,18 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
 void WriteRecordsCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,sheet_center_x,sheet_pressure_center_x,sheet_patch_count,sheet_support_bbox_xmin,sheet_support_bbox_xmax,sheet_support_bbox_zmin,sheet_support_bbox_zmax,eval_ms,active_regions,active_samples\n";
+    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,sheet_center_x,sheet_pressure_center_x,sheet_area_ratio,sheet_mean_support_seed_count,sheet_normal_spread,sheet_patch_count,sheet_fiber_count,sheet_fallback_regions,sheet_used_fallback,sheet_support_bbox_xmin,sheet_support_bbox_xmax,sheet_support_bbox_zmin,sheet_support_bbox_zmax,eval_ms,active_regions,active_samples\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
             << record.tilt_z_deg << ',' << record.offset_x << ',' << (record.valid ? 1 : 0) << ',' << record.force_x
             << ',' << record.force_y << ',' << record.force_z << ',' << record.torque_x << ',' << record.torque_y << ','
             << record.torque_z << ',' << record.active_area << ',' << record.area_occ << ',' << record.area_band << ','
-            << record.area_sheet << ',' << record.max_penetration << ','
-            << record.pressure_center_x << ',' << record.sheet_center_x << ',' << record.sheet_pressure_center_x << ','
-            << record.sheet_patch_count << ',' << record.sheet_support_bbox_xmin << ','
+            << record.area_sheet << ',' << record.max_penetration << ',' << record.pressure_center_x << ','
+            << record.sheet_center_x << ',' << record.sheet_pressure_center_x << ',' << record.sheet_area_ratio << ','
+            << record.sheet_mean_support_seed_count << ',' << record.sheet_normal_spread << ','
+            << record.sheet_patch_count << ',' << record.sheet_fiber_count << ',' << record.sheet_fallback_regions
+            << ',' << (record.sheet_used_fallback ? 1 : 0) << ',' << record.sheet_support_bbox_xmin << ','
             << record.sheet_support_bbox_xmax << ',' << record.sheet_support_bbox_zmin << ','
             << record.sheet_support_bbox_zmax << ',' << record.eval_ms << ',' << record.active_regions << ','
             << record.active_samples << '\n';
@@ -651,6 +689,11 @@ std::vector<CurvedSheetSummary> BuildCurvedSheetSummaries(const std::vector<Curv
         summary.bbox_zmin_rmse += bbox_zmin_error * bbox_zmin_error;
         summary.bbox_zmax_rmse += bbox_zmax_error * bbox_zmax_error;
         summary.patch_count_rmse += patch_error * patch_error;
+        summary.mean_area_ratio += record.sheet_area_ratio;
+        summary.mean_support_seed_count += record.sheet_mean_support_seed_count;
+        summary.mean_normal_spread += record.sheet_normal_spread;
+        summary.mean_fiber_count += static_cast<double>(record.sheet_fiber_count);
+        summary.fallback_ratio += record.sheet_used_fallback ? 1.0 : 0.0;
     }
 
     std::vector<CurvedSheetSummary> result;
@@ -665,6 +708,11 @@ std::vector<CurvedSheetSummary> BuildCurvedSheetSummaries(const std::vector<Curv
         summary.bbox_zmin_rmse = std::sqrt(summary.bbox_zmin_rmse * inv_count);
         summary.bbox_zmax_rmse = std::sqrt(summary.bbox_zmax_rmse * inv_count);
         summary.patch_count_rmse = std::sqrt(summary.patch_count_rmse * inv_count);
+        summary.mean_area_ratio *= inv_count;
+        summary.mean_support_seed_count *= inv_count;
+        summary.mean_normal_spread *= inv_count;
+        summary.mean_fiber_count *= inv_count;
+        summary.fallback_ratio *= inv_count;
         result.push_back(summary);
     }
 
@@ -681,15 +729,18 @@ std::vector<CurvedSheetSummary> BuildCurvedSheetSummaries(const std::vector<Curv
 void WriteCurvedSheetRecordsCsv(const fs::path& path, const std::vector<CurvedSheetRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,mode,sample_index,penetration,valid,area_occ,area_band,area_sheet,area_sheet_ref,sheet_center_x,sheet_center_x_ref,sheet_pressure_center_x,sheet_patch_count,sheet_patch_count_ref,sheet_support_bbox_xmin,sheet_support_bbox_xmin_ref,sheet_support_bbox_xmax,sheet_support_bbox_xmax_ref,sheet_support_bbox_zmin,sheet_support_bbox_zmin_ref,sheet_support_bbox_zmax,sheet_support_bbox_zmax_ref,eval_ms\n";
+    out << "scenario,mode,sample_index,penetration,valid,area_occ,area_band,area_sheet,area_sheet_ref,sheet_center_x,sheet_center_x_ref,sheet_pressure_center_x,sheet_area_ratio,sheet_mean_support_seed_count,sheet_normal_spread,sheet_patch_count,sheet_patch_count_ref,sheet_fiber_count,sheet_fallback_regions,sheet_used_fallback,sheet_support_bbox_xmin,sheet_support_bbox_xmin_ref,sheet_support_bbox_xmax,sheet_support_bbox_xmax_ref,sheet_support_bbox_zmin,sheet_support_bbox_zmin_ref,sheet_support_bbox_zmax,sheet_support_bbox_zmax_ref,eval_ms\n";
 
     for (const auto& record : records) {
         const auto reference = MakeCylinderSheetReference(record.penetration);
         out << record.scenario << ',' << record.mode << ',' << record.sample_index << ',' << record.penetration << ','
             << (record.valid ? 1 : 0) << ',' << record.area_occ << ',' << record.area_band << ',' << record.area_sheet
             << ',' << reference.sheet_area << ',' << record.sheet_center_x << ',' << reference.sheet_center_x << ','
-            << record.sheet_pressure_center_x << ',' << record.sheet_patch_count << ',' << reference.sheet_patch_count
-            << ',' << record.sheet_support_bbox_xmin << ',' << reference.sheet_support_bbox_xmin << ','
+            << record.sheet_pressure_center_x << ',' << record.sheet_area_ratio << ','
+            << record.sheet_mean_support_seed_count << ',' << record.sheet_normal_spread << ','
+            << record.sheet_patch_count << ',' << reference.sheet_patch_count << ',' << record.sheet_fiber_count << ','
+            << record.sheet_fallback_regions << ',' << (record.sheet_used_fallback ? 1 : 0) << ','
+            << record.sheet_support_bbox_xmin << ',' << reference.sheet_support_bbox_xmin << ','
             << record.sheet_support_bbox_xmax << ',' << reference.sheet_support_bbox_xmax << ','
             << record.sheet_support_bbox_zmin << ',' << reference.sheet_support_bbox_zmin << ','
             << record.sheet_support_bbox_zmax << ',' << reference.sheet_support_bbox_zmax << ',' << record.eval_ms
@@ -700,13 +751,15 @@ void WriteCurvedSheetRecordsCsv(const fs::path& path, const std::vector<CurvedSh
 void WriteCurvedSheetSummaryCsv(const fs::path& path, const std::vector<CurvedSheetSummary>& summaries) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,mode,sample_count,mean_eval_ms,area_sheet_rmse,sheet_center_x_rmse,bbox_xmin_rmse,bbox_xmax_rmse,bbox_zmin_rmse,bbox_zmax_rmse,patch_count_rmse\n";
+    out << "scenario,mode,sample_count,mean_eval_ms,area_sheet_rmse,sheet_center_x_rmse,bbox_xmin_rmse,bbox_xmax_rmse,bbox_zmin_rmse,bbox_zmax_rmse,patch_count_rmse,mean_area_ratio,mean_support_seed_count,mean_normal_spread,mean_fiber_count,fallback_ratio\n";
 
     for (const auto& summary : summaries) {
         out << summary.scenario << ',' << summary.mode << ',' << summary.sample_count << ',' << summary.mean_eval_ms
             << ',' << summary.area_sheet_rmse << ',' << summary.sheet_center_x_rmse << ','
             << summary.bbox_xmin_rmse << ',' << summary.bbox_xmax_rmse << ',' << summary.bbox_zmin_rmse << ','
-            << summary.bbox_zmax_rmse << ',' << summary.patch_count_rmse << '\n';
+            << summary.bbox_zmax_rmse << ',' << summary.patch_count_rmse << ',' << summary.mean_area_ratio << ','
+            << summary.mean_support_seed_count << ',' << summary.mean_normal_spread << ','
+            << summary.mean_fiber_count << ',' << summary.fallback_ratio << '\n';
     }
 }
 
@@ -717,7 +770,9 @@ void PrintCurvedSheetSummary(const std::vector<CurvedSheetSummary>& summaries) {
                   << summary.area_sheet_rmse << "  center_x_rmse=" << summary.sheet_center_x_rmse
                   << "  bbox_x_rmse=(" << summary.bbox_xmin_rmse << "," << summary.bbox_xmax_rmse << ")"
                   << "  bbox_z_rmse=(" << summary.bbox_zmin_rmse << "," << summary.bbox_zmax_rmse << ")"
-                  << "  patch_rmse=" << summary.patch_count_rmse << "  mean_ms=" << summary.mean_eval_ms << "\n";
+                  << "  patch_rmse=" << summary.patch_count_rmse << "  area_ratio=" << summary.mean_area_ratio
+                  << "  support=" << summary.mean_support_seed_count << "  fibers=" << summary.mean_fiber_count
+                  << "  fallback=" << summary.fallback_ratio << "  mean_ms=" << summary.mean_eval_ms << "\n";
     }
 }
 
@@ -798,7 +853,10 @@ int main(int argc, char* argv[]) {
     pair.SetShapeBFrame(ChFrame<>());
     pair.GetStabilizationSettings().enable_region_history = false;
     ChSDFSheetCollapseSettings planar_sheet_settings;
-    planar_sheet_settings.use_local_fiber_projection = true;
+    planar_sheet_settings.use_step6_v2 = true;
+    planar_sheet_settings.allow_dominant_axis_fallback = true;
+    planar_sheet_settings.max_patch_count_before_fallback = 8;
+    planar_sheet_settings.max_fiber_count_before_fallback = 256;
     pair.SetSheetCollapseSettings(planar_sheet_settings);
 
     ChSDFShapePair curved_pair;

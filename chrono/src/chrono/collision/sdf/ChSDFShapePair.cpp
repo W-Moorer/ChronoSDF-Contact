@@ -355,6 +355,9 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.sheet_footprint_area = 0;
     result.active_area = 0;
     result.largest_sheet_patch_area = 0;
+    result.sheet_area_ratio = 0;
+    result.sheet_mean_support_seed_count = 0;
+    result.sheet_normal_spread = 0;
     result.integrated_pressure = 0;
     result.mean_pressure = 0;
     result.mean_local_stiffness = 0;
@@ -367,6 +370,9 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.sheet_pressure_center_world = VNULL;
     result.sheet_support_bbox_world = ChAABB();
     result.sheet_patch_count = 0;
+    result.sheet_fiber_count = 0;
+    result.sheet_fallback_regions = 0;
+    result.sheet_used_fallback = false;
     result.sheet_result.reset();
     result.wrench_shape_a = {VNULL, VNULL};
     result.wrench_shape_b = {VNULL, VNULL};
@@ -416,10 +422,16 @@ void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) cons
     result.sheet_area = 0;
     result.sheet_footprint_area = 0;
     result.largest_sheet_patch_area = 0;
+    result.sheet_area_ratio = 0;
+    result.sheet_mean_support_seed_count = 0;
+    result.sheet_normal_spread = 0;
     result.sheet_center_world = VNULL;
     result.sheet_pressure_center_world = VNULL;
     result.sheet_support_bbox_world = ChAABB();
     result.sheet_patch_count = 0;
+    result.sheet_fiber_count = 0;
+    result.sheet_fallback_regions = 0;
+    result.sheet_used_fallback = false;
     result.sheet_result.reset();
 
     if (!m_sheet_settings.enable || !result.valid) {
@@ -432,10 +444,16 @@ void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) cons
     result.sheet_area = sheet->sheet_area;
     result.sheet_footprint_area = sheet->sheet_footprint_area;
     result.largest_sheet_patch_area = sheet->largest_patch_area;
+    result.sheet_area_ratio = sheet->area_ratio;
+    result.sheet_mean_support_seed_count = sheet->mean_support_seed_count;
+    result.sheet_normal_spread = sheet->normal_spread;
     result.sheet_center_world = sheet->sheet_center_world;
     result.sheet_pressure_center_world = sheet->pressure_center_world;
     result.sheet_support_bbox_world = sheet->support_bbox_world;
     result.sheet_patch_count = sheet->patch_count;
+    result.sheet_fiber_count = sheet->fiber_count;
+    result.sheet_fallback_regions = sheet->fallback_regions;
+    result.sheet_used_fallback = sheet->used_fallback;
     result.sheet_result = std::move(sheet);
 }
 
