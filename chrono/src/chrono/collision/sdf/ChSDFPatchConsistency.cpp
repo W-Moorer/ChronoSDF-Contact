@@ -91,8 +91,24 @@ ChSDFPatchConsistencyResult MakePassthroughPatchResult(const ChSDFPatchBandAggre
     result.wrench_world_b_corrected = aggregate.wrench_world_b;
     result.centroid_world = aggregate.centroid_world;
     result.pressure_center_world = aggregate.pressure_center_world;
+    result.sheet_pressure_center_world = aggregate.pressure_center_world;
+    result.corrected_pressure_center_world = aggregate.pressure_center_world;
     result.support_bbox_world = aggregate.support_bbox_world;
     return result;
+}
+
+ChWrenchd BuildFirstMomentCorrectedWrench(const ChWrenchd& wrench_band,
+                                          const ChVector3d& origin_world,
+                                          const ChVector3d& band_pressure_center_world,
+                                          const ChVector3d& corrected_pressure_center_world,
+                                          double alpha) {
+    ChWrenchd corrected = {alpha * wrench_band.force, VNULL};
+
+    const ChVector3d band_arm = band_pressure_center_world - origin_world;
+    const ChVector3d corrected_arm = corrected_pressure_center_world - origin_world;
+    const ChVector3d intrinsic_band = wrench_band.torque - Vcross(band_arm, wrench_band.force);
+    corrected.torque = alpha * intrinsic_band + Vcross(corrected_arm, corrected.force);
+    return corrected;
 }
 
 }  // namespace
@@ -170,6 +186,8 @@ std::vector<ChSDFPatchBandAggregate> ChSDFPatchConsistencyBridge::BuildPatchBand
 ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyResult(
     const ChSDFPatchBandAggregate& band_patch,
     const ChSDFSheetPatch& sheet_patch,
+    const ChFrameMoving<>& shape_a_frame_abs,
+    const ChFrameMoving<>& shape_b_frame_abs,
     const ChSDFPatchConsistencySettings& settings) {
     if (band_patch.band_area <= settings.min_band_area) {
         return MakePassthroughPatchResult(band_patch);
@@ -186,6 +204,13 @@ ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyRe
     result.wrench_world_b_band = band_patch.wrench_world_b;
     result.centroid_world = band_patch.centroid_world;
     result.pressure_center_world = band_patch.pressure_center_world;
+    result.sheet_pressure_center_world =
+        IsFiniteVector(sheet_patch.pressure_center_world) ? sheet_patch.pressure_center_world : sheet_patch.centroid_world;
+    result.corrected_pressure_center_world =
+        IsFiniteVector(sheet_patch.centroid_world)
+            ? sheet_patch.centroid_world
+            : (IsFiniteVector(result.sheet_pressure_center_world) ? result.sheet_pressure_center_world
+                                                                  : result.pressure_center_world);
     result.support_bbox_world = sheet_patch.support_bbox_world.IsInverted() ? band_patch.support_bbox_world
                                                                             : sheet_patch.support_bbox_world;
 
@@ -196,10 +221,19 @@ ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyRe
 
     result.alpha = alpha;
     result.integrated_pressure_corrected = alpha * result.integrated_pressure_band;
-    result.wrench_world_a_corrected.force = alpha * result.wrench_world_a_band.force;
-    result.wrench_world_a_corrected.torque = alpha * result.wrench_world_a_band.torque;
-    result.wrench_world_b_corrected.force = alpha * result.wrench_world_b_band.force;
-    result.wrench_world_b_corrected.torque = alpha * result.wrench_world_b_band.torque;
+    if (settings.use_first_moment_consistent_correction) {
+        result.wrench_world_a_corrected =
+            BuildFirstMomentCorrectedWrench(result.wrench_world_a_band, shape_a_frame_abs.GetPos(),
+                                            result.pressure_center_world, result.corrected_pressure_center_world, alpha);
+        result.wrench_world_b_corrected =
+            BuildFirstMomentCorrectedWrench(result.wrench_world_b_band, shape_b_frame_abs.GetPos(),
+                                            result.pressure_center_world, result.corrected_pressure_center_world, alpha);
+    } else {
+        result.wrench_world_a_corrected.force = alpha * result.wrench_world_a_band.force;
+        result.wrench_world_a_corrected.torque = alpha * result.wrench_world_a_band.torque;
+        result.wrench_world_b_corrected.force = alpha * result.wrench_world_b_band.force;
+        result.wrench_world_b_corrected.torque = alpha * result.wrench_world_b_band.torque;
+    }
     return result;
 }
 
@@ -285,7 +319,8 @@ ChSDFPatchConsistencyPairResult ChSDFPatchConsistencyBridge::BuildPairConsistenc
             } else {
                 const auto patch_it = patch_by_id.find(aggregate.patch_id);
                 if (patch_it != patch_by_id.end()) {
-                    patch_result = BuildPatchConsistencyResult(aggregate, *patch_it->second, settings);
+                    patch_result = BuildPatchConsistencyResult(aggregate, *patch_it->second, band_result.shape_a_frame_abs,
+                                                               band_result.shape_b_frame_abs, settings);
                 } else {
                     patch_result = MakePassthroughPatchResult(aggregate);
                 }

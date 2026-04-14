@@ -29,6 +29,7 @@ struct ChApi ChSDFPatchConsistencySettings {
     bool clamp_alpha = true;
     bool use_sample_index_back_projection = true;
     bool add_unassigned_band_residual_patch = true;
+    bool use_first_moment_consistent_correction = true;
 
     double min_alpha = 0.25;
     double max_alpha = 4.0;
@@ -73,6 +74,8 @@ struct ChApi ChSDFPatchConsistencyResult {
 
     ChVector3d centroid_world = VNULL;
     ChVector3d pressure_center_world = VNULL;
+    ChVector3d sheet_pressure_center_world = VNULL;
+    ChVector3d corrected_pressure_center_world = VNULL;
     ChAABB support_bbox_world;
 };
 
@@ -106,6 +109,8 @@ class ChApi ChSDFPatchConsistencyBridge {
     static ChSDFPatchConsistencyResult BuildPatchConsistencyResult(
         const ChSDFPatchBandAggregate& band_patch,
         const ChSDFSheetPatch& sheet_patch,
+        const ChFrameMoving<>& shape_a_frame_abs,
+        const ChFrameMoving<>& shape_b_frame_abs,
         const ChSDFPatchConsistencySettings& settings);
 
     static ChSDFPatchConsistencyPairResult BuildPairConsistencyResult(
