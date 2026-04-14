@@ -14,6 +14,7 @@
 #define CH_SDF_CONTACT_WRENCH_H
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "chrono/collision/ChCollisionShapeSDF.h"
@@ -27,6 +28,7 @@
 namespace chrono {
 
 class ChBody;
+struct ChSDFSheetShapePairResult;
 
 /// @addtogroup chrono_collision
 /// @{
@@ -235,6 +237,9 @@ struct ChApi ChSDFShapePairContactResult {
     std::size_t total_regions = 0;
     std::size_t active_regions = 0;
 
+    double occupied_area = 0;
+    double band_area = 0;
+    double sheet_area = 0;
     double active_area = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
@@ -244,6 +249,8 @@ struct ChApi ChSDFShapePairContactResult {
     double max_effective_mass = 0;
     double max_penetration = 0;
     double max_pressure = 0;
+
+    std::shared_ptr<ChSDFSheetShapePairResult> sheet_result;
 
     std::vector<ChSDFBrickPairWrenchResult> regions;
 

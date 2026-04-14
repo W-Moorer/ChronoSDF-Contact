@@ -21,6 +21,7 @@
 #include "chrono/collision/sdf/ChSDFContactSurface.h"
 #include "chrono/collision/sdf/ChSDFContactWrench.h"
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
+#include "chrono/collision/sdf/ChSDFSheetRepresentation.h"
 #include "chrono/physics/ChBody.h"
 
 namespace chrono {
@@ -58,6 +59,7 @@ class ChApi ChSDFShapePair {
     void SetShapeAFrame(const ChFrame<>& frame) { m_shape_a_frame = frame; }
     void SetShapeBFrame(const ChFrame<>& frame) { m_shape_b_frame = frame; }
     void SetChartSettings(const ChSDFRegionChartSettings& settings) { m_chart_settings = settings; }
+    void SetSheetCollapseSettings(const ChSDFSheetCollapseSettings& settings) { m_sheet_settings = settings; }
 
     ChBody* GetBodyA() const { return m_body_a; }
     ChBody* GetBodyB() const { return m_body_b; }
@@ -68,6 +70,7 @@ class ChApi ChSDFShapePair {
     const ChFrame<>& GetShapeAFrame() const { return m_shape_a_frame; }
     const ChFrame<>& GetShapeBFrame() const { return m_shape_b_frame; }
     const ChSDFRegionChartSettings& GetChartSettings() const { return m_chart_settings; }
+    const ChSDFSheetCollapseSettings& GetSheetCollapseSettings() const { return m_sheet_settings; }
     StabilizationSettings& GetStabilizationSettings() { return m_stabilization_settings; }
     const StabilizationSettings& GetStabilizationSettings() const { return m_stabilization_settings; }
 
@@ -109,6 +112,9 @@ class ChApi ChSDFShapePair {
         const ChSDFContactRegionBuilder::Settings& region_settings,
         const ChSDFRegionChartSettings& chart_settings) const;
 
+    /// Build the supplement4-style sheet representation from an already evaluated band result.
+    ChSDFSheetShapePairResult BuildSheetRepresentation(const ChSDFShapePairContactResult& band_result) const;
+
     /// Build connected dual-SDF contact regions and evaluate the resulting distributed contact wrenches.
     ChSDFShapePairContactResult EvaluateContact(const ChSDFBrickPairBroadphase::Settings& pair_settings,
                                                 const ChSDFContactRegionBuilder::Settings& region_settings,
@@ -142,6 +148,7 @@ class ChApi ChSDFShapePair {
                                                        const ChFrame<>& shape_b_frame_abs);
     void ApplyActivationHysteresis(ChSDFShapePairContactResult& result);
     void RebuildAggregateResult(ChSDFShapePairContactResult& result) const;
+    void UpdateSheetResult(ChSDFShapePairContactResult& result) const;
     void UpdateHistory(const ChSDFShapePairContactResult& result);
 
     ChBody* m_body_a = nullptr;
@@ -153,6 +160,7 @@ class ChApi ChSDFShapePair {
     ChFrame<> m_shape_a_frame;
     ChFrame<> m_shape_b_frame;
     ChSDFRegionChartSettings m_chart_settings;
+    ChSDFSheetCollapseSettings m_sheet_settings;
 
     StabilizationSettings m_stabilization_settings;
     std::vector<RegionHistoryState> m_region_history;

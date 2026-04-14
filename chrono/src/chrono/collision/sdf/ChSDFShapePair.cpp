@@ -17,6 +17,7 @@
 
 #include "chrono/core/ChFrameMoving.h"
 #include "chrono/collision/sdf/ChSDFPFCEvaluator.h"
+#include "chrono/collision/sdf/ChSDFSheetRepresentation.h"
 #include "chrono/collision/sdf/ChSDFVolumeContactEvaluator.h"
 
 namespace chrono {
@@ -184,6 +185,10 @@ std::vector<ChSDFContactSurfaceRegion> ChSDFShapePair::BuildContactSurfaces(
                                                            GetShapeBFrameAbs(), regions, chart_settings);
 }
 
+ChSDFSheetShapePairResult ChSDFShapePair::BuildSheetRepresentation(const ChSDFShapePairContactResult& band_result) const {
+    return ChSDFSheetBuilder::BuildShapePair(band_result, m_sheet_settings);
+}
+
 ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
     const ChSDFBrickPairBroadphase::Settings& pair_settings,
     const ChSDFContactRegionBuilder::Settings& region_settings,
@@ -198,6 +203,7 @@ ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
         ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_a),
         ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_b), pressure_settings);
     ApplyActivationHysteresis(result);
+    UpdateSheetResult(result);
     UpdateHistory(result);
     return result;
 }
@@ -343,6 +349,9 @@ void ChSDFShapePair::ApplyActivationHysteresis(ChSDFShapePairContactResult& resu
 void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result) const {
     result.total_regions = result.regions.size();
     result.active_regions = 0;
+    result.occupied_area = 0;
+    result.band_area = 0;
+    result.sheet_area = 0;
     result.active_area = 0;
     result.integrated_pressure = 0;
     result.mean_pressure = 0;
@@ -352,6 +361,7 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.max_effective_mass = 0;
     result.max_penetration = 0;
     result.max_pressure = 0;
+    result.sheet_result.reset();
     result.wrench_shape_a = {VNULL, VNULL};
     result.wrench_shape_b = {VNULL, VNULL};
     result.wrench_world_a = {VNULL, VNULL};
@@ -390,6 +400,25 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
         result.mean_local_stiffness = local_stiffness_area_sum / result.active_area;
         result.mean_effective_mass = effective_mass_area_sum / result.active_area;
     }
+
+    result.band_area = result.active_area;
+}
+
+void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) const {
+    result.band_area = result.active_area;
+    result.occupied_area = 0;
+    result.sheet_area = 0;
+    result.sheet_result.reset();
+
+    if (!m_sheet_settings.enable || !result.valid) {
+        return;
+    }
+
+    auto sheet = std::make_shared<ChSDFSheetShapePairResult>(BuildSheetRepresentation(result));
+    result.occupied_area = sheet->occupied_area;
+    result.band_area = sheet->band_area;
+    result.sheet_area = sheet->sheet_area;
+    result.sheet_result = std::move(sheet);
 }
 
 void ChSDFShapePair::UpdateHistory(const ChSDFShapePairContactResult& result) {
