@@ -122,6 +122,49 @@ struct BenchmarkSummary {
     double pressure_center_x_rmse = 0;
 };
 
+struct CurvedSheetReference {
+    double sheet_area = 0;
+    double sheet_center_x = 0;
+    double sheet_support_bbox_xmin = 0;
+    double sheet_support_bbox_xmax = 0;
+    double sheet_support_bbox_zmin = 0;
+    double sheet_support_bbox_zmax = 0;
+    std::size_t sheet_patch_count = 0;
+};
+
+struct CurvedSheetRecord {
+    std::string scenario;
+    std::string mode;
+    std::size_t sample_index = 0;
+    double penetration = 0;
+    bool valid = false;
+    double area_occ = 0;
+    double area_band = 0;
+    double area_sheet = 0;
+    double sheet_center_x = 0;
+    double sheet_pressure_center_x = 0;
+    double sheet_support_bbox_xmin = 0;
+    double sheet_support_bbox_xmax = 0;
+    double sheet_support_bbox_zmin = 0;
+    double sheet_support_bbox_zmax = 0;
+    double eval_ms = 0;
+    std::size_t sheet_patch_count = 0;
+};
+
+struct CurvedSheetSummary {
+    std::string scenario;
+    std::string mode;
+    std::size_t sample_count = 0;
+    double mean_eval_ms = 0;
+    double area_sheet_rmse = 0;
+    double sheet_center_x_rmse = 0;
+    double bbox_xmin_rmse = 0;
+    double bbox_xmax_rmse = 0;
+    double bbox_zmin_rmse = 0;
+    double bbox_zmax_rmse = 0;
+    double patch_count_rmse = 0;
+};
+
 double GridStep(std::size_t count, double half_length) {
     return (count > 1) ? (2.0 * half_length / static_cast<double>(count - 1)) : (2.0 * half_length);
 }
@@ -147,15 +190,23 @@ fs::path DefaultNvdbPath() {
            "unit_box_centered.nvdb";
 }
 
+fs::path DefaultCylinderNvdbPath() {
+    return fs::path(BENCHMARK_TOOL_DIR).parent_path().parent_path() / "chrono" / "template_project" / "assets" /
+           "unit_cylinder_z.nvdb";
+}
+
 fs::path DefaultOutputDir() {
     return fs::path(BENCHMARK_TOOL_DIR).parent_path().parent_path() / "paper" / "results" / "benchmark_box_contact";
 }
 
 void PrintUsage(const char* exe_name) {
     std::cout << "Usage:\n"
-              << "  " << exe_name << " [--input path/to/unit_box_centered.nvdb] [--output output_dir]\n\n"
+              << "  " << exe_name
+              << " [--input path/to/unit_box_centered.nvdb] [--curved-input path/to/unit_cylinder_z.nvdb]"
+              << " [--output output_dir]\n\n"
               << "Defaults:\n"
               << "  input:  " << DefaultNvdbPath().string() << "\n"
+              << "  curved: " << DefaultCylinderNvdbPath().string() << "\n"
               << "  output: " << DefaultOutputDir().string() << "\n";
 }
 
@@ -173,6 +224,15 @@ std::array<ScenarioSpec, 2> BuildScenarios() {
     }
 
     return {centered, eccentric};
+}
+
+ScenarioSpec BuildCurvedSheetScenario() {
+    ScenarioSpec curved;
+    curved.name = "cylinder_strip_centered";
+    for (std::size_t i = 0; i < 8; ++i) {
+        curved.poses.push_back(PoseSample{i, 0.010 + 0.010 * static_cast<double>(i), 0.0, 0.0});
+    }
+    return curved;
 }
 
 std::vector<MethodSpec> BuildMethods() {
@@ -198,6 +258,22 @@ double ComputePressureCenterX(const ChSDFShapePairContactResult& result) {
     }
 
     return weight_sum > 0 ? weighted_x / weight_sum : 0.0;
+}
+
+CurvedSheetReference MakeCylinderSheetReference(double penetration) {
+    constexpr double radius = 0.5;
+    constexpr double length = 1.0;
+
+    CurvedSheetReference ref;
+    const double half_width = std::sqrt(std::max(2.0 * radius * penetration - penetration * penetration, 0.0));
+    ref.sheet_area = 2.0 * half_width * length;
+    ref.sheet_center_x = 0.0;
+    ref.sheet_support_bbox_xmin = -half_width;
+    ref.sheet_support_bbox_xmax = half_width;
+    ref.sheet_support_bbox_zmin = -0.5 * length;
+    ref.sheet_support_bbox_zmax = 0.5 * length;
+    ref.sheet_patch_count = ref.sheet_area > 0 ? 1 : 0;
+    return ref;
 }
 
 BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
@@ -262,6 +338,73 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
     }
 
     return record;
+}
+
+std::vector<CurvedSheetRecord> EvaluateCurvedSheetModes(const std::string& scenario_name,
+                                                        const PoseSample& pose,
+                                                        ChBody* moving_body,
+                                                        ChSDFShapePair& pair,
+                                                        const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                                        const ChSDFContactRegionBuilder::Settings& region_settings,
+                                                        const ChSDFNormalPressureSettings& pressure_settings) {
+    moving_body->SetPos(ChVector3d(0.0, 1.0 - pose.penetration, 0.0));
+    moving_body->SetRot(QUNIT);
+    moving_body->SetPosDt(VNULL);
+    moving_body->SetAngVelLocal(VNULL);
+
+    const auto original_settings = pair.GetSheetCollapseSettings();
+    auto disabled_settings = original_settings;
+    disabled_settings.enable = false;
+    pair.SetSheetCollapseSettings(disabled_settings);
+    const auto band_result = pair.EvaluateContact(pair_settings, region_settings, pressure_settings);
+    pair.SetSheetCollapseSettings(original_settings);
+
+    struct SheetModeSpec {
+        const char* name;
+        bool use_local_fiber_projection;
+    };
+
+    const std::array<SheetModeSpec, 2> modes = {{
+        {"dominant_axis", false},
+        {"local_fiber", true},
+    }};
+
+    std::vector<CurvedSheetRecord> records;
+    records.reserve(modes.size());
+
+    for (const auto& mode : modes) {
+        auto settings = original_settings;
+        settings.enable = true;
+        settings.use_local_fiber_projection = mode.use_local_fiber_projection;
+
+        const auto start = std::chrono::steady_clock::now();
+        const auto sheet = ChSDFSheetBuilder::BuildShapePair(band_result, settings);
+        const auto stop = std::chrono::steady_clock::now();
+
+        CurvedSheetRecord record;
+        record.scenario = scenario_name;
+        record.mode = mode.name;
+        record.sample_index = pose.sample_index;
+        record.penetration = pose.penetration;
+        record.valid = band_result.valid && sheet.HasSamples();
+        record.area_occ = sheet.occupied_area;
+        record.area_band = sheet.band_area;
+        record.area_sheet = sheet.sheet_footprint_area;
+        record.sheet_center_x = sheet.sheet_center_world.x();
+        record.sheet_pressure_center_x = sheet.pressure_center_world.x();
+        record.sheet_patch_count = sheet.patch_count;
+        record.eval_ms = std::chrono::duration<double, std::milli>(stop - start).count();
+        if (!sheet.support_bbox_world.IsInverted()) {
+            record.sheet_support_bbox_xmin = sheet.support_bbox_world.min.x();
+            record.sheet_support_bbox_xmax = sheet.support_bbox_world.max.x();
+            record.sheet_support_bbox_zmin = sheet.support_bbox_world.min.z();
+            record.sheet_support_bbox_zmax = sheet.support_bbox_world.max.z();
+        }
+
+        records.push_back(record);
+    }
+
+    return records;
 }
 
 BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
@@ -480,10 +623,109 @@ void PrintSummary(const std::vector<BenchmarkSummary>& summaries) {
     }
 }
 
+std::vector<CurvedSheetSummary> BuildCurvedSheetSummaries(const std::vector<CurvedSheetRecord>& records) {
+    std::unordered_map<std::string, CurvedSheetSummary> summaries;
+
+    for (const auto& record : records) {
+        const auto reference = MakeCylinderSheetReference(record.penetration);
+        const std::string key = record.scenario + "#" + record.mode;
+        auto& summary = summaries[key];
+        summary.scenario = record.scenario;
+        summary.mode = record.mode;
+        summary.sample_count++;
+        summary.mean_eval_ms += record.eval_ms;
+
+        const double area_error = record.area_sheet - reference.sheet_area;
+        const double center_error = record.sheet_center_x - reference.sheet_center_x;
+        const double bbox_xmin_error = record.sheet_support_bbox_xmin - reference.sheet_support_bbox_xmin;
+        const double bbox_xmax_error = record.sheet_support_bbox_xmax - reference.sheet_support_bbox_xmax;
+        const double bbox_zmin_error = record.sheet_support_bbox_zmin - reference.sheet_support_bbox_zmin;
+        const double bbox_zmax_error = record.sheet_support_bbox_zmax - reference.sheet_support_bbox_zmax;
+        const double patch_error =
+            static_cast<double>(record.sheet_patch_count) - static_cast<double>(reference.sheet_patch_count);
+
+        summary.area_sheet_rmse += area_error * area_error;
+        summary.sheet_center_x_rmse += center_error * center_error;
+        summary.bbox_xmin_rmse += bbox_xmin_error * bbox_xmin_error;
+        summary.bbox_xmax_rmse += bbox_xmax_error * bbox_xmax_error;
+        summary.bbox_zmin_rmse += bbox_zmin_error * bbox_zmin_error;
+        summary.bbox_zmax_rmse += bbox_zmax_error * bbox_zmax_error;
+        summary.patch_count_rmse += patch_error * patch_error;
+    }
+
+    std::vector<CurvedSheetSummary> result;
+    result.reserve(summaries.size());
+    for (auto& [key, summary] : summaries) {
+        const double inv_count = 1.0 / static_cast<double>(summary.sample_count);
+        summary.mean_eval_ms *= inv_count;
+        summary.area_sheet_rmse = std::sqrt(summary.area_sheet_rmse * inv_count);
+        summary.sheet_center_x_rmse = std::sqrt(summary.sheet_center_x_rmse * inv_count);
+        summary.bbox_xmin_rmse = std::sqrt(summary.bbox_xmin_rmse * inv_count);
+        summary.bbox_xmax_rmse = std::sqrt(summary.bbox_xmax_rmse * inv_count);
+        summary.bbox_zmin_rmse = std::sqrt(summary.bbox_zmin_rmse * inv_count);
+        summary.bbox_zmax_rmse = std::sqrt(summary.bbox_zmax_rmse * inv_count);
+        summary.patch_count_rmse = std::sqrt(summary.patch_count_rmse * inv_count);
+        result.push_back(summary);
+    }
+
+    std::stable_sort(result.begin(), result.end(), [](const CurvedSheetSummary& a, const CurvedSheetSummary& b) {
+        if (a.scenario != b.scenario) {
+            return a.scenario < b.scenario;
+        }
+        return a.mode < b.mode;
+    });
+
+    return result;
+}
+
+void WriteCurvedSheetRecordsCsv(const fs::path& path, const std::vector<CurvedSheetRecord>& records) {
+    std::ofstream out(path);
+    out << std::setprecision(16);
+    out << "scenario,mode,sample_index,penetration,valid,area_occ,area_band,area_sheet,area_sheet_ref,sheet_center_x,sheet_center_x_ref,sheet_pressure_center_x,sheet_patch_count,sheet_patch_count_ref,sheet_support_bbox_xmin,sheet_support_bbox_xmin_ref,sheet_support_bbox_xmax,sheet_support_bbox_xmax_ref,sheet_support_bbox_zmin,sheet_support_bbox_zmin_ref,sheet_support_bbox_zmax,sheet_support_bbox_zmax_ref,eval_ms\n";
+
+    for (const auto& record : records) {
+        const auto reference = MakeCylinderSheetReference(record.penetration);
+        out << record.scenario << ',' << record.mode << ',' << record.sample_index << ',' << record.penetration << ','
+            << (record.valid ? 1 : 0) << ',' << record.area_occ << ',' << record.area_band << ',' << record.area_sheet
+            << ',' << reference.sheet_area << ',' << record.sheet_center_x << ',' << reference.sheet_center_x << ','
+            << record.sheet_pressure_center_x << ',' << record.sheet_patch_count << ',' << reference.sheet_patch_count
+            << ',' << record.sheet_support_bbox_xmin << ',' << reference.sheet_support_bbox_xmin << ','
+            << record.sheet_support_bbox_xmax << ',' << reference.sheet_support_bbox_xmax << ','
+            << record.sheet_support_bbox_zmin << ',' << reference.sheet_support_bbox_zmin << ','
+            << record.sheet_support_bbox_zmax << ',' << reference.sheet_support_bbox_zmax << ',' << record.eval_ms
+            << '\n';
+    }
+}
+
+void WriteCurvedSheetSummaryCsv(const fs::path& path, const std::vector<CurvedSheetSummary>& summaries) {
+    std::ofstream out(path);
+    out << std::setprecision(16);
+    out << "scenario,mode,sample_count,mean_eval_ms,area_sheet_rmse,sheet_center_x_rmse,bbox_xmin_rmse,bbox_xmax_rmse,bbox_zmin_rmse,bbox_zmax_rmse,patch_count_rmse\n";
+
+    for (const auto& summary : summaries) {
+        out << summary.scenario << ',' << summary.mode << ',' << summary.sample_count << ',' << summary.mean_eval_ms
+            << ',' << summary.area_sheet_rmse << ',' << summary.sheet_center_x_rmse << ','
+            << summary.bbox_xmin_rmse << ',' << summary.bbox_xmax_rmse << ',' << summary.bbox_zmin_rmse << ','
+            << summary.bbox_zmax_rmse << ',' << summary.patch_count_rmse << '\n';
+    }
+}
+
+void PrintCurvedSheetSummary(const std::vector<CurvedSheetSummary>& summaries) {
+    std::cout << "\nCurved sheet benchmark against analytic cylinder-plane footprint\n";
+    for (const auto& summary : summaries) {
+        std::cout << "  [" << summary.scenario << "] " << summary.mode << "  area_sheet_rmse="
+                  << summary.area_sheet_rmse << "  center_x_rmse=" << summary.sheet_center_x_rmse
+                  << "  bbox_x_rmse=(" << summary.bbox_xmin_rmse << "," << summary.bbox_xmax_rmse << ")"
+                  << "  bbox_z_rmse=(" << summary.bbox_zmin_rmse << "," << summary.bbox_zmax_rmse << ")"
+                  << "  patch_rmse=" << summary.patch_count_rmse << "  mean_ms=" << summary.mean_eval_ms << "\n";
+    }
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
     fs::path input_path = DefaultNvdbPath();
+    fs::path curved_input_path = DefaultCylinderNvdbPath();
     fs::path output_dir = DefaultOutputDir();
 
     for (int i = 1; i < argc; ++i) {
@@ -494,6 +736,10 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "--input" && i + 1 < argc) {
             input_path = fs::path(argv[++i]);
+            continue;
+        }
+        if (arg == "--curved-input" && i + 1 < argc) {
+            curved_input_path = fs::path(argv[++i]);
             continue;
         }
         if (arg == "--output" && i + 1 < argc) {
@@ -508,6 +754,10 @@ int main(int argc, char* argv[]) {
 
     if (!fs::exists(input_path)) {
         std::cerr << "Missing NanoVDB asset: " << input_path.string() << "\n";
+        return 2;
+    }
+    if (!fs::exists(curved_input_path)) {
+        std::cerr << "Missing curved NanoVDB asset: " << curved_input_path.string() << "\n";
         return 2;
     }
 
@@ -529,11 +779,13 @@ int main(int argc, char* argv[]) {
     auto material = chrono_types::make_shared<ChContactMaterialNSC>();
     auto sdf_shape_a = chrono_types::make_shared<ChCollisionShapeSDF>(material, input_path.string());
     auto sdf_shape_b = chrono_types::make_shared<ChCollisionShapeSDF>(material, input_path.string());
+    auto sdf_shape_cylinder = chrono_types::make_shared<ChCollisionShapeSDF>(material, curved_input_path.string());
 
-    if (!sdf_shape_a->IsLoaded() || !sdf_shape_b->IsLoaded()) {
+    if (!sdf_shape_a->IsLoaded() || !sdf_shape_b->IsLoaded() || !sdf_shape_cylinder->IsLoaded()) {
         std::cerr << "Failed to load NanoVDB asset.\n";
         std::cerr << "  shape A: " << sdf_shape_a->GetLastError() << "\n";
         std::cerr << "  shape B: " << sdf_shape_b->GetLastError() << "\n";
+        std::cerr << "  shape cylinder: " << sdf_shape_cylinder->GetLastError() << "\n";
         return 3;
     }
 
@@ -545,6 +797,19 @@ int main(int argc, char* argv[]) {
     pair.SetShapeAFrame(ChFrame<>());
     pair.SetShapeBFrame(ChFrame<>());
     pair.GetStabilizationSettings().enable_region_history = false;
+    ChSDFSheetCollapseSettings planar_sheet_settings;
+    planar_sheet_settings.use_local_fiber_projection = true;
+    pair.SetSheetCollapseSettings(planar_sheet_settings);
+
+    ChSDFShapePair curved_pair;
+    curved_pair.SetBodyA(fixed_body.get());
+    curved_pair.SetBodyB(moving_body.get());
+    curved_pair.SetShapeA(sdf_shape_a);
+    curved_pair.SetShapeB(sdf_shape_cylinder);
+    curved_pair.SetShapeAFrame(ChFrame<>());
+    curved_pair.SetShapeBFrame(ChFrame<>());
+    curved_pair.GetStabilizationSettings().enable_region_history = false;
+    curved_pair.SetSheetCollapseSettings(planar_sheet_settings);
 
     ChSDFBrickPairBroadphase::Settings pair_settings;
     pair_settings.world_margin = 0.05;
@@ -579,12 +844,16 @@ int main(int argc, char* argv[]) {
     potential_settings.depth_cap = -1;
     sdf_shape_a->SetPotentialFieldSettings(potential_settings);
     sdf_shape_b->SetPotentialFieldSettings(potential_settings);
+    sdf_shape_cylinder->SetPotentialFieldSettings(potential_settings);
 
     const auto scenarios = BuildScenarios();
+    const auto curved_sheet_scenario = BuildCurvedSheetScenario();
     const auto methods = BuildMethods();
 
     std::vector<BenchmarkRecord> records;
     records.reserve(64);
+    std::vector<CurvedSheetRecord> curved_sheet_records;
+    curved_sheet_records.reserve(32);
 
     for (const auto& scenario : scenarios) {
         for (const auto& pose : scenario.poses) {
@@ -603,18 +872,43 @@ int main(int argc, char* argv[]) {
 
     const auto summaries = BuildSummaries(records);
 
+    auto curved_pair_settings = pair_settings;
+    curved_pair_settings.world_margin = std::max(curved_pair_settings.world_margin, 0.08);
+    curved_pair_settings.max_separation_distance = std::max(curved_pair_settings.max_separation_distance, 0.08);
+    curved_pair_settings.max_min_abs_value = std::max(curved_pair_settings.max_min_abs_value, 0.10);
+
+    auto curved_region_settings = region_settings;
+    curved_region_settings.sample_max_abs_distance = std::max(curved_region_settings.sample_max_abs_distance, 0.08);
+    curved_region_settings.max_combined_gap = std::max(curved_region_settings.max_combined_gap, 0.08);
+
+    for (const auto& pose : curved_sheet_scenario.poses) {
+        const auto pose_records =
+            EvaluateCurvedSheetModes(curved_sheet_scenario.name, pose, moving_body.get(), curved_pair,
+                                     curved_pair_settings, curved_region_settings, pressure_settings);
+        curved_sheet_records.insert(curved_sheet_records.end(), pose_records.begin(), pose_records.end());
+    }
+
+    const auto curved_sheet_summaries = BuildCurvedSheetSummaries(curved_sheet_records);
+
     const fs::path records_path = output_dir / "benchmark_records.csv";
     const fs::path summary_path = output_dir / "benchmark_summary.csv";
     const fs::path centered_area_path = output_dir / "centered_area_modes.csv";
+    const fs::path curved_sheet_records_path = output_dir / "curved_sheet_records.csv";
+    const fs::path curved_sheet_summary_path = output_dir / "curved_sheet_summary.csv";
     WriteRecordsCsv(records_path, records);
     WriteSummaryCsv(summary_path, summaries);
     WriteCenteredAreaModesCsv(centered_area_path, records);
+    WriteCurvedSheetRecordsCsv(curved_sheet_records_path, curved_sheet_records);
+    WriteCurvedSheetSummaryCsv(curved_sheet_summary_path, curved_sheet_summaries);
 
     std::cout << "Wrote:\n"
               << "  " << records_path.string() << "\n"
               << "  " << summary_path.string() << "\n"
-              << "  " << centered_area_path.string() << "\n";
+              << "  " << centered_area_path.string() << "\n"
+              << "  " << curved_sheet_records_path.string() << "\n"
+              << "  " << curved_sheet_summary_path.string() << "\n";
     PrintSummary(summaries);
+    PrintCurvedSheetSummary(curved_sheet_summaries);
 
     return 0;
 }

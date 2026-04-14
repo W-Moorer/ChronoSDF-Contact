@@ -55,6 +55,7 @@ CMakeUserPresets.json
 # Generated sparse distance fields
 *.vdb
 *.nvdb
+!chrono/template_project/assets/unit_cylinder_z.nvdb
 
 # Compiled Static libraries
 *.lai
