@@ -538,6 +538,12 @@ SupportCellKey MakeSupportCellKey(const ChSDFSheetSupportEvidence& evidence) {
     return SupportCellKey{evidence.source_carrier_axis, iu, iv};
 }
 
+ChVector2i QuantizePatchPlaneCell(const ChVector2d& uv, double cell_size) {
+    const double inv_cell = cell_size > 1.0e-12 ? 1.0 / cell_size : 1.0;
+    return ChVector2i(static_cast<int>(std::lround(uv.x() * inv_cell)),
+                      static_cast<int>(std::lround(uv.y() * inv_cell)));
+}
+
 std::vector<ChSDFPatchPlaneLayeredCell> BuildPatchPlaneLayeredCells(const ChSDFSheetPatch& patch,
                                                                     const std::vector<ChSDFSheetFiberSample>& samples,
                                                                     const ChVector3d& patch_origin_world,
@@ -604,34 +610,123 @@ std::vector<ChSDFPatchPlaneLayeredCell> BuildPatchPlaneLayeredCells(const ChSDFS
 }
 
 std::vector<ChSDFPatchPlaneSupportCell> CollapseLayeredCellsToSheetCells(
-    const std::vector<ChSDFPatchPlaneLayeredCell>& layered_cells) {
+    const std::vector<ChSDFPatchPlaneLayeredCell>& layered_cells,
+    const ChVector3d& patch_origin_world,
+    const ChVector3d& patch_normal_world,
+    double cell_size) {
     std::vector<ChSDFPatchPlaneSupportCell> support_cells;
-    support_cells.reserve(layered_cells.size());
+    if (layered_cells.empty() || cell_size <= 1.0e-12) {
+        return support_cells;
+    }
 
-    for (const auto& layered : layered_cells) {
-        ChSDFPatchPlaneSupportCell cell;
-        cell.carrier_axis = layered.carrier_axis;
-        cell.cell_ij = layered.cell_ij;
-        cell.center_uv = layered.center_uv;
-        cell.half_extents_uv = layered.half_extents_uv;
-        cell.measure_area = layered.measure_area_sum;
-        cell.layer_count = layered.samples.size();
-        cell.occupied = !layered.samples.empty();
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(patch_normal_world, tangent_u, tangent_v);
+    int min_u = std::numeric_limits<int>::max();
+    int max_u = std::numeric_limits<int>::min();
+    int min_v = std::numeric_limits<int>::max();
+    int max_v = std::numeric_limits<int>::min();
+    for (const auto& cell : layered_cells) {
+        min_u = std::min(min_u, cell.cell_ij.x());
+        max_u = std::max(max_u, cell.cell_ij.x());
+        min_v = std::min(min_v, cell.cell_ij.y());
+        max_v = std::max(max_v, cell.cell_ij.y());
+    }
 
-        ChVector3d representative_point_sum = VNULL;
-        ChVector3d representative_normal_sum = VNULL;
+    const int span_u = max_u - min_u + 1;
+    const int span_v = max_v - min_v + 1;
+    const bool major_along_u = span_u >= span_v;
+    const double area_per_sheet_cell = cell_size * cell_size;
+
+    struct StripColumnAccumulator {
+        int major_coord = 0;
+        double measure_area = 0;
+        double center_minor_sum = 0;
         double point_weight_sum = 0;
+        ChVector3d normal_sum = VNULL;
+        std::array<double, 3> axis_weight = {0.0, 0.0, 0.0};
+        std::size_t strip_count = 0;
+        std::vector<std::size_t> source_sample_indices;
+    };
+
+    std::unordered_map<int, StripColumnAccumulator> columns;
+    columns.reserve(layered_cells.size());
+    for (const auto& layered : layered_cells) {
+        const int major_coord = major_along_u ? layered.cell_ij.x() : layered.cell_ij.y();
+        const int minor_coord = major_along_u ? layered.cell_ij.y() : layered.cell_ij.x();
+        auto& column = columns[major_coord];
+        column.major_coord = major_coord;
+        column.measure_area += layered.measure_area_sum;
+        column.center_minor_sum += static_cast<double>(minor_coord) * layered.measure_area_sum;
+        column.strip_count++;
+
         for (const auto& sample : layered.samples) {
-            representative_point_sum += sample.seed_world * sample.measure_area;
-            representative_normal_sum += sample.normal_world * sample.measure_area;
-            point_weight_sum += sample.measure_area;
-            cell.source_sample_indices.push_back(sample.source_sample_index);
+            column.point_weight_sum += sample.measure_area;
+            column.normal_sum += sample.normal_world * sample.measure_area;
+            if (sample.source_carrier_axis >= 0 && sample.source_carrier_axis < 3) {
+                column.axis_weight[static_cast<std::size_t>(sample.source_carrier_axis)] += sample.measure_area;
+            }
+            column.source_sample_indices.push_back(sample.source_sample_index);
         }
-        if (point_weight_sum > 1.0e-16) {
-            cell.representative_point_world = representative_point_sum / point_weight_sum;
-            cell.representative_normal_world = SafeNormalized(representative_normal_sum,
-                                                              layered.samples.front().normal_world);
+    }
+
+    struct SheetBin {
+        ChVector2i cell_ij = ChVector2i(0, 0);
+        double measure_area = 0;
+        ChVector3d normal_sum = VNULL;
+        std::array<double, 3> axis_weight = {0.0, 0.0, 0.0};
+        std::size_t contributing_strips = 0;
+        std::vector<std::size_t> source_sample_indices;
+    };
+
+    std::unordered_map<FiberKey, SheetBin, FiberKeyHash> sheet_bins;
+    sheet_bins.reserve(layered_cells.size() * 8);
+    for (auto& item : columns) {
+        auto& column = item.second;
+        if (column.measure_area <= 1.0e-16) {
+            continue;
         }
+
+        const int width_cells =
+            std::max(1, static_cast<int>(std::lround(column.measure_area / std::max(area_per_sheet_cell, 1.0e-16))));
+        const double center_minor = column.center_minor_sum / column.measure_area;
+        const int start_minor = static_cast<int>(std::lround(center_minor - 0.5 * static_cast<double>(width_cells - 1)));
+        const double per_cell_measure = column.measure_area / static_cast<double>(width_cells);
+
+        for (int offset = 0; offset < width_cells; ++offset) {
+            const int minor_coord = start_minor + offset;
+            const ChVector2i cell_ij =
+                major_along_u ? ChVector2i(column.major_coord, minor_coord) : ChVector2i(minor_coord, column.major_coord);
+            FiberKey key{cell_ij.x(), cell_ij.y()};
+            auto& bin = sheet_bins[key];
+            bin.cell_ij = cell_ij;
+            bin.measure_area += per_cell_measure;
+            bin.normal_sum += column.normal_sum / static_cast<double>(width_cells);
+            for (std::size_t axis = 0; axis < bin.axis_weight.size(); ++axis) {
+                bin.axis_weight[axis] += column.axis_weight[axis] / static_cast<double>(width_cells);
+            }
+            bin.contributing_strips = std::max(bin.contributing_strips, column.strip_count);
+            bin.source_sample_indices.insert(bin.source_sample_indices.end(), column.source_sample_indices.begin(),
+                                             column.source_sample_indices.end());
+        }
+    }
+
+    support_cells.reserve(sheet_bins.size());
+    for (auto& item : sheet_bins) {
+        auto& bin = item.second;
+        ChSDFPatchPlaneSupportCell cell;
+        cell.cell_ij = bin.cell_ij;
+        cell.half_extents_uv = ChVector2d(0.5 * cell_size, 0.5 * cell_size);
+        cell.measure_area = bin.measure_area;
+        cell.layer_count = std::max<std::size_t>(1, bin.contributing_strips);
+        cell.occupied = true;
+        cell.first_layer = true;
+        cell.center_uv = ChVector2d(bin.cell_ij.x() * cell_size, bin.cell_ij.y() * cell_size);
+        cell.representative_point_world = patch_origin_world + tangent_u * cell.center_uv.x() + tangent_v * cell.center_uv.y();
+        cell.representative_normal_world = SafeNormalized(bin.normal_sum, patch_normal_world);
+        cell.carrier_axis = static_cast<int>(std::distance(
+            bin.axis_weight.begin(), std::max_element(bin.axis_weight.begin(), bin.axis_weight.end())));
+        cell.source_sample_indices = std::move(bin.source_sample_indices);
         std::sort(cell.source_sample_indices.begin(), cell.source_sample_indices.end());
         cell.source_sample_indices.erase(
             std::unique(cell.source_sample_indices.begin(), cell.source_sample_indices.end()),
@@ -648,9 +743,10 @@ std::vector<ChSDFPatchPlaneSupportCell> CollapseLayeredCellsToSheetCells(
     return support_cells;
 }
 
-SheetCellTopologyStats AnnotateSupportSheetTopology(std::vector<ChSDFPatchPlaneSupportCell>& support_cells) {
+SheetCellTopologyStats AnnotateSupportSheetTopology(std::size_t layered_cell_count,
+                                                    std::vector<ChSDFPatchPlaneSupportCell>& support_cells) {
     SheetCellTopologyStats stats;
-    stats.layered_cell_count = support_cells.size();
+    stats.layered_cell_count = layered_cell_count;
     if (support_cells.empty()) {
         return stats;
     }
@@ -982,8 +1078,9 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.mean_normal_world = SafeNormalized(normal_sum, samples[patch.sample_indices.front()].normal_world);
     const auto layered_cells =
         BuildPatchPlaneLayeredCells(patch, samples, patch.centroid_world, patch.mean_normal_world, sheet_scale);
-    patch.support_cells = CollapseLayeredCellsToSheetCells(layered_cells);
-    const auto topology_stats = AnnotateSupportSheetTopology(patch.support_cells);
+    patch.support_cells =
+        CollapseLayeredCellsToSheetCells(layered_cells, patch.centroid_world, patch.mean_normal_world, sheet_scale);
+    const auto topology_stats = AnnotateSupportSheetTopology(layered_cells.size(), patch.support_cells);
     patch.layered_cell_count = topology_stats.layered_cell_count;
     patch.max_layer_count_per_cell = topology_stats.max_layer_count_per_cell;
     patch.largest_connected_sheet_cells = topology_stats.largest_connected_sheet_cells;
