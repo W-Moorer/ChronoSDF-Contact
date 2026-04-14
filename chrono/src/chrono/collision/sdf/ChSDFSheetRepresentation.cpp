@@ -113,11 +113,14 @@ std::vector<ChVector2i> BuildPatchNeighborOffsets(int neighbor_mode) {
 void FinalizePatch(ChSDFSheetPatch& patch,
                    const std::vector<ChSDFSheetFiberSample>& samples,
                    const ChVector3d& fallback_normal) {
+    patch.support_columns = 0;
     patch.measure_area = 0;
     patch.footprint_area = 0;
     patch.centroid_world = VNULL;
+    patch.pressure_center_world = VNULL;
     patch.mean_normal_world = VNULL;
     patch.bounds_world = ChAABB();
+    patch.support_bbox_world = ChAABB();
 
     if (patch.sample_indices.empty()) {
         return;
@@ -125,19 +128,29 @@ void FinalizePatch(ChSDFSheetPatch& patch,
 
     ChVector3d centroid_sum = VNULL;
     ChVector3d normal_sum = VNULL;
+    ChVector3d pressure_center_sum = VNULL;
+    double pressure_weight_sum = 0;
 
     for (const std::size_t sample_index : patch.sample_indices) {
         const auto& sample = samples[sample_index];
+        patch.support_columns++;
         patch.measure_area += sample.measure_area;
         patch.footprint_area += sample.footprint_area;
         centroid_sum += sample.centroid_world * sample.measure_area;
         normal_sum += sample.normal_world * sample.measure_area;
         patch.bounds_world += sample.source_bounds_world;
+        patch.support_bbox_world += sample.source_bounds_world;
+
+        const double pressure_weight = sample.force_world.Length();
+        pressure_weight_sum += pressure_weight;
+        pressure_center_sum += sample.pressure_center_world * pressure_weight;
     }
 
     if (patch.measure_area > 0) {
         patch.centroid_world = centroid_sum / patch.measure_area;
     }
+    patch.pressure_center_world =
+        pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, fallback_normal);
 }
 
@@ -324,7 +337,13 @@ ChSDFSheetRegion ChSDFSheetBuilder::BuildRegion(const ChSDFBrickPairWrenchResult
     region.mean_normal_world = SafeNormalized(normal_sum, fallback_normal);
     region.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : region.centroid_world;
+    region.support_bbox_world = region.bounds_world;
     region.patches = BuildPatches(region.samples, settings.patch_neighbor_mode, region.mean_normal_world);
+    region.patch_count = region.patches.size();
+    region.largest_patch_area = 0;
+    for (const auto& patch : region.patches) {
+        region.largest_patch_area = std::max(region.largest_patch_area, patch.measure_area);
+    }
 
     return region;
 }
@@ -379,7 +398,10 @@ ChSDFSheetShapePairResult ChSDFSheetBuilder::BuildShapePair(const ChSDFShapePair
         result.sheet_area += sheet_region.measure_area;
         result.sheet_footprint_area += sheet_region.footprint_area;
         result.collapsed_samples += sheet_region.samples.size();
+        result.patch_count += sheet_region.patches.size();
+        result.largest_patch_area = std::max(result.largest_patch_area, sheet_region.largest_patch_area);
         sheet_center_sum += sheet_region.centroid_world * sheet_region.measure_area;
+        result.support_bbox_world += sheet_region.support_bbox_world;
 
         const double region_pressure_weight = band_region.integrated_pressure;
         pressure_weight_sum += region_pressure_weight;

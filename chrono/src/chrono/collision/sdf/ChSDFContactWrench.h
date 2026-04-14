@@ -240,7 +240,9 @@ struct ChApi ChSDFShapePairContactResult {
     double occupied_area = 0;
     double band_area = 0;
     double sheet_area = 0;
+    double sheet_footprint_area = 0;
     double active_area = 0;
+    double largest_sheet_patch_area = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
     double mean_local_stiffness = 0;
@@ -249,6 +251,12 @@ struct ChApi ChSDFShapePairContactResult {
     double max_effective_mass = 0;
     double max_penetration = 0;
     double max_pressure = 0;
+
+    ChVector3d sheet_center_world = VNULL;
+    ChVector3d sheet_pressure_center_world = VNULL;
+    ChAABB sheet_support_bbox_world;
+
+    std::size_t sheet_patch_count = 0;
 
     std::shared_ptr<ChSDFSheetShapePairResult> sheet_result;
 

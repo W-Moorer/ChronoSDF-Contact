@@ -30,7 +30,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -93,10 +92,17 @@ struct BenchmarkRecord {
     double area_sheet = 0;
     double max_penetration = 0;
     double pressure_center_x = 0;
+    double sheet_center_x = 0;
+    double sheet_pressure_center_x = 0;
+    double sheet_support_bbox_xmin = 0;
+    double sheet_support_bbox_xmax = 0;
+    double sheet_support_bbox_zmin = 0;
+    double sheet_support_bbox_zmax = 0;
     double eval_ms = 0;
 
     std::size_t active_regions = 0;
     std::size_t active_samples = 0;
+    std::size_t sheet_patch_count = 0;
 };
 
 struct BenchmarkSummary {
@@ -194,52 +200,6 @@ double ComputePressureCenterX(const ChSDFShapePairContactResult& result) {
     return weight_sum > 0 ? weighted_x / weight_sum : 0.0;
 }
 
-int DominantAxis(const ChVector3d& normal) {
-    const ChVector3d abs_normal(std::abs(normal.x()), std::abs(normal.y()), std::abs(normal.z()));
-    if (abs_normal.x() >= abs_normal.y() && abs_normal.x() >= abs_normal.z()) {
-        return 0;
-    }
-    if (abs_normal.y() >= abs_normal.x() && abs_normal.y() >= abs_normal.z()) {
-        return 1;
-    }
-    return 2;
-}
-
-std::uint64_t CollapseKey(const ChVector3i& coord, int dominant_axis) {
-    const int a = dominant_axis == 0 ? coord.y() : coord.x();
-    const int b = dominant_axis == 2 ? coord.y() : coord.z();
-    const std::uint32_t ua = static_cast<std::uint32_t>(a);
-    const std::uint32_t ub = static_cast<std::uint32_t>(b);
-    return (static_cast<std::uint64_t>(ua) << 32) | static_cast<std::uint64_t>(ub);
-}
-
-double ComputeCollapsedSheetArea(const ChSDFShapePairContactResult& result, double spacing) {
-    if (spacing <= 0) {
-        return 0.0;
-    }
-
-    const double cell_area = spacing * spacing;
-    double collapsed_area = 0.0;
-
-    for (const auto& region : result.regions) {
-        if (!region.HasActiveContact()) {
-            continue;
-        }
-
-        const int dominant_axis = DominantAxis(region.region.mean_normal_world);
-        std::unordered_set<std::uint64_t> occupied_columns;
-        occupied_columns.reserve(region.samples.size());
-
-        for (const auto& sample : region.samples) {
-            occupied_columns.insert(CollapseKey(sample.region_sample.coord, dominant_axis));
-        }
-
-        collapsed_area += static_cast<double>(occupied_columns.size()) * cell_area;
-    }
-
-    return collapsed_area;
-}
-
 BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
                                     const PoseSample& pose,
                                     ChBody* moving_body,
@@ -281,10 +241,25 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
         active_samples += region.active_samples;
     }
     record.active_samples = active_samples;
-    record.area_occ = static_cast<double>(active_samples) * region_settings.sample_spacing * region_settings.sample_spacing;
-    record.area_band = result.active_area;
-    record.area_sheet = ComputeCollapsedSheetArea(result, region_settings.sample_spacing);
+    record.area_occ = result.occupied_area;
+    record.area_band = result.band_area;
+    record.area_sheet = result.sheet_footprint_area;
     record.active_area = record.area_band;
+
+    if (result.sheet_result) {
+        record.area_occ = result.sheet_result->occupied_area;
+        record.area_band = result.sheet_result->band_area;
+        record.area_sheet = result.sheet_result->sheet_footprint_area;
+        record.sheet_center_x = result.sheet_result->sheet_center_world.x();
+        record.sheet_pressure_center_x = result.sheet_result->pressure_center_world.x();
+        record.sheet_patch_count = result.sheet_result->patch_count;
+        if (!result.sheet_result->support_bbox_world.IsInverted()) {
+            record.sheet_support_bbox_xmin = result.sheet_result->support_bbox_world.min.x();
+            record.sheet_support_bbox_xmax = result.sheet_result->support_bbox_world.max.x();
+            record.sheet_support_bbox_zmin = result.sheet_result->support_bbox_world.min.z();
+            record.sheet_support_bbox_zmax = result.sheet_result->support_bbox_world.max.z();
+        }
+    }
 
     return record;
 }
@@ -365,7 +340,7 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
 void WriteRecordsCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,eval_ms,active_regions,active_samples\n";
+    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,sheet_center_x,sheet_pressure_center_x,sheet_patch_count,sheet_support_bbox_xmin,sheet_support_bbox_xmax,sheet_support_bbox_zmin,sheet_support_bbox_zmax,eval_ms,active_regions,active_samples\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
@@ -373,7 +348,10 @@ void WriteRecordsCsv(const fs::path& path, const std::vector<BenchmarkRecord>& r
             << ',' << record.force_y << ',' << record.force_z << ',' << record.torque_x << ',' << record.torque_y << ','
             << record.torque_z << ',' << record.active_area << ',' << record.area_occ << ',' << record.area_band << ','
             << record.area_sheet << ',' << record.max_penetration << ','
-            << record.pressure_center_x << ',' << record.eval_ms << ',' << record.active_regions << ','
+            << record.pressure_center_x << ',' << record.sheet_center_x << ',' << record.sheet_pressure_center_x << ','
+            << record.sheet_patch_count << ',' << record.sheet_support_bbox_xmin << ','
+            << record.sheet_support_bbox_xmax << ',' << record.sheet_support_bbox_zmin << ','
+            << record.sheet_support_bbox_zmax << ',' << record.eval_ms << ',' << record.active_regions << ','
             << record.active_samples << '\n';
     }
 }

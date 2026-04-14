@@ -60,14 +60,17 @@ struct ChApi ChSDFSheetFiberSample {
 /// One connected component on the collapsed sheet lattice.
 struct ChApi ChSDFSheetPatch {
     std::size_t patch_id = 0;
+    std::size_t support_columns = 0;
 
     double measure_area = 0;
     double footprint_area = 0;
 
     ChVector3d centroid_world = VNULL;
+    ChVector3d pressure_center_world = VNULL;
     ChVector3d mean_normal_world = VNULL;
 
     ChAABB bounds_world;
+    ChAABB support_bbox_world;
 
     std::vector<std::size_t> sample_indices;
 
@@ -78,17 +81,20 @@ struct ChApi ChSDFSheetPatch {
 struct ChApi ChSDFSheetRegion {
     std::size_t region_id = 0;
     std::size_t persistent_id = 0;
+    std::size_t patch_count = 0;
 
     int dominant_axis = -1;
 
     double measure_area = 0;
     double footprint_area = 0;
+    double largest_patch_area = 0;
 
     ChVector3d centroid_world = VNULL;
     ChVector3d pressure_center_world = VNULL;
     ChVector3d mean_normal_world = VNULL;
 
     ChAABB bounds_world;
+    ChAABB support_bbox_world;
 
     std::vector<ChSDFSheetFiberSample> samples;
     std::vector<ChSDFSheetPatch> patches;
@@ -102,12 +108,15 @@ struct ChApi ChSDFSheetShapePairResult {
     double band_area = 0;
     double sheet_area = 0;
     double sheet_footprint_area = 0;
+    double largest_patch_area = 0;
 
     ChVector3d sheet_center_world = VNULL;
     ChVector3d pressure_center_world = VNULL;
+    ChAABB support_bbox_world;
 
     std::size_t occupied_cells = 0;
     std::size_t collapsed_samples = 0;
+    std::size_t patch_count = 0;
 
     std::vector<ChSDFSheetRegion> regions;
 

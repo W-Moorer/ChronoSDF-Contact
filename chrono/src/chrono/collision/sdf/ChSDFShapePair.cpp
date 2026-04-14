@@ -352,7 +352,9 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.occupied_area = 0;
     result.band_area = 0;
     result.sheet_area = 0;
+    result.sheet_footprint_area = 0;
     result.active_area = 0;
+    result.largest_sheet_patch_area = 0;
     result.integrated_pressure = 0;
     result.mean_pressure = 0;
     result.mean_local_stiffness = 0;
@@ -361,6 +363,10 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.max_effective_mass = 0;
     result.max_penetration = 0;
     result.max_pressure = 0;
+    result.sheet_center_world = VNULL;
+    result.sheet_pressure_center_world = VNULL;
+    result.sheet_support_bbox_world = ChAABB();
+    result.sheet_patch_count = 0;
     result.sheet_result.reset();
     result.wrench_shape_a = {VNULL, VNULL};
     result.wrench_shape_b = {VNULL, VNULL};
@@ -408,6 +414,12 @@ void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) cons
     result.band_area = result.active_area;
     result.occupied_area = 0;
     result.sheet_area = 0;
+    result.sheet_footprint_area = 0;
+    result.largest_sheet_patch_area = 0;
+    result.sheet_center_world = VNULL;
+    result.sheet_pressure_center_world = VNULL;
+    result.sheet_support_bbox_world = ChAABB();
+    result.sheet_patch_count = 0;
     result.sheet_result.reset();
 
     if (!m_sheet_settings.enable || !result.valid) {
@@ -418,6 +430,12 @@ void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) cons
     result.occupied_area = sheet->occupied_area;
     result.band_area = sheet->band_area;
     result.sheet_area = sheet->sheet_area;
+    result.sheet_footprint_area = sheet->sheet_footprint_area;
+    result.largest_sheet_patch_area = sheet->largest_patch_area;
+    result.sheet_center_world = sheet->sheet_center_world;
+    result.sheet_pressure_center_world = sheet->pressure_center_world;
+    result.sheet_support_bbox_world = sheet->support_bbox_world;
+    result.sheet_patch_count = sheet->patch_count;
     result.sheet_result = std::move(sheet);
 }
 
