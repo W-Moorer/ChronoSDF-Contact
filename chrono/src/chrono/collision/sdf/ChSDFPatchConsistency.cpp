@@ -12,10 +12,8 @@
 
 #include "chrono/collision/sdf/ChSDFPatchConsistency.h"
 
-#include <array>
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <unordered_map>
 
 namespace chrono {
@@ -23,18 +21,6 @@ namespace {
 
 bool IsFiniteVector(const ChVector3d& v) {
     return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
-}
-
-ChVector3d SafeNormalized(const ChVector3d& v, const ChVector3d& fallback = VECT_Y) {
-    const double length = v.Length();
-    return length > 1.0e-12 ? v / length : fallback;
-}
-
-void BuildOrthonormalBasis(const ChVector3d& normal, ChVector3d& tangent_u, ChVector3d& tangent_v) {
-    const ChVector3d n = SafeNormalized(normal, VECT_Y);
-    const ChVector3d reference = (std::abs(n.y()) < 0.9) ? VECT_Y : VECT_X;
-    tangent_u = SafeNormalized(Vcross(reference, n), VECT_X);
-    tangent_v = SafeNormalized(Vcross(n, tangent_u), VECT_Z);
 }
 
 double ClampValue(double value, double lower, double upper) {
@@ -124,105 +110,170 @@ ChWrenchd BuildFirstMomentCorrectedWrench(const ChWrenchd& wrench_band,
     return corrected;
 }
 
-struct ProjectedRect {
-    double min_u = 0;
-    double max_u = 0;
-    double min_v = 0;
-    double max_v = 0;
-    bool valid = false;
-};
-
-ProjectedRect MakeCenteredRect(double center_u, double center_v, double area) {
-    ProjectedRect rect;
-    const double half_extent = 0.5 * std::sqrt(std::max(area, 0.0));
-    rect.min_u = center_u - half_extent;
-    rect.max_u = center_u + half_extent;
-    rect.min_v = center_v - half_extent;
-    rect.max_v = center_v + half_extent;
-    rect.valid = std::isfinite(rect.min_u) && std::isfinite(rect.max_u) && std::isfinite(rect.min_v) &&
-                 std::isfinite(rect.max_v);
-    return rect;
+double SignedPolygonArea(const std::vector<ChVector2d>& polygon) {
+    if (polygon.size() < 3) {
+        return 0;
+    }
+    double twice_area = 0;
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size()];
+        twice_area += a.x() * b.y() - a.y() * b.x();
+    }
+    return 0.5 * twice_area;
 }
 
-ProjectedRect ProjectSupportRect(const ChAABB& bbox,
-                                 const ChVector3d& origin_world,
-                                 const ChVector3d& tangent_u,
-                                 const ChVector3d& tangent_v) {
-    ProjectedRect rect;
-    if (bbox.IsInverted()) {
-        return rect;
-    }
-
-    rect.min_u = std::numeric_limits<double>::infinity();
-    rect.max_u = -std::numeric_limits<double>::infinity();
-    rect.min_v = std::numeric_limits<double>::infinity();
-    rect.max_v = -std::numeric_limits<double>::infinity();
-
-    const std::array<ChVector3d, 8> corners = {
-        ChVector3d(bbox.min.x(), bbox.min.y(), bbox.min.z()), ChVector3d(bbox.min.x(), bbox.min.y(), bbox.max.z()),
-        ChVector3d(bbox.min.x(), bbox.max.y(), bbox.min.z()), ChVector3d(bbox.min.x(), bbox.max.y(), bbox.max.z()),
-        ChVector3d(bbox.max.x(), bbox.min.y(), bbox.min.z()), ChVector3d(bbox.max.x(), bbox.min.y(), bbox.max.z()),
-        ChVector3d(bbox.max.x(), bbox.max.y(), bbox.min.z()), ChVector3d(bbox.max.x(), bbox.max.y(), bbox.max.z())};
-
-    for (const auto& corner : corners) {
-        const ChVector3d rel = corner - origin_world;
-        const double u = Vdot(rel, tangent_u);
-        const double v = Vdot(rel, tangent_v);
-        rect.min_u = std::min(rect.min_u, u);
-        rect.max_u = std::max(rect.max_u, u);
-        rect.min_v = std::min(rect.min_v, v);
-        rect.max_v = std::max(rect.max_v, v);
-    }
-
-    rect.valid = std::isfinite(rect.min_u) && std::isfinite(rect.max_u) && std::isfinite(rect.min_v) &&
-                 std::isfinite(rect.max_v);
-    return rect;
+double PolygonArea(const std::vector<ChVector2d>& polygon) {
+    return std::abs(SignedPolygonArea(polygon));
 }
 
-ProjectedRect RescaleRectToArea(const ProjectedRect& rect, double target_area) {
-    if (!rect.valid) {
-        return rect;
+ChVector2d PolygonCentroid(const std::vector<ChVector2d>& polygon) {
+    if (polygon.empty()) {
+        return ChVector2d(0, 0);
+    }
+    if (polygon.size() < 3) {
+        ChVector2d centroid(0, 0);
+        for (const auto& point : polygon) {
+            centroid += point;
+        }
+        return centroid / static_cast<double>(polygon.size());
     }
 
-    ProjectedRect scaled = rect;
-    const double span_u = std::max(rect.max_u - rect.min_u, 0.0);
-    const double span_v = std::max(rect.max_v - rect.min_v, 0.0);
-    const double rect_area = span_u * span_v;
-    if (rect_area <= 1.0e-16 || target_area <= 1.0e-16) {
-        return scaled;
+    const double signed_area = SignedPolygonArea(polygon);
+    if (std::abs(signed_area) <= 1.0e-16) {
+        ChVector2d centroid(0, 0);
+        for (const auto& point : polygon) {
+            centroid += point;
+        }
+        return centroid / static_cast<double>(polygon.size());
     }
 
-    const double center_u = 0.5 * (rect.min_u + rect.max_u);
-    const double center_v = 0.5 * (rect.min_v + rect.max_v);
-    const double scale = std::sqrt(target_area / rect_area);
-    const double half_u = 0.5 * span_u * scale;
-    const double half_v = 0.5 * span_v * scale;
-    scaled.min_u = center_u - half_u;
-    scaled.max_u = center_u + half_u;
-    scaled.min_v = center_v - half_v;
-    scaled.max_v = center_v + half_v;
-    return scaled;
+    ChVector2d centroid(0, 0);
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size()];
+        const double cross = a.x() * b.y() - a.y() * b.x();
+        centroid += (a + b) * cross;
+    }
+    return centroid / (6.0 * signed_area);
 }
 
-ProjectedRect ProjectSheetSampleSupport(const ChSDFSheetFiberSample& sample,
-                                        const ChVector3d& patch_origin_world,
-                                        const ChVector3d& tangent_u,
-                                        const ChVector3d& tangent_v) {
-    auto rect = ProjectSupportRect(sample.support_bbox_world, patch_origin_world, tangent_u, tangent_v);
-    const double target_area = std::max(sample.footprint_area, sample.measure_area);
-    if (rect.valid) {
-        rect = RescaleRectToArea(rect, target_area);
-        return rect;
+ChVector2d IntersectSegmentWithVertical(const ChVector2d& a, const ChVector2d& b, double x_clip) {
+    const double dx = b.x() - a.x();
+    if (std::abs(dx) <= 1.0e-16) {
+        return ChVector2d(x_clip, a.y());
     }
-
-    const ChVector3d rel = sample.centroid_world - patch_origin_world;
-    return MakeCenteredRect(Vdot(rel, tangent_u), Vdot(rel, tangent_v), target_area);
+    const double t = (x_clip - a.x()) / dx;
+    return ChVector2d(x_clip, a.y() + t * (b.y() - a.y()));
 }
 
-double OverlapInterval(double a0, double a1, double b0, double b1, double& min_overlap, double& max_overlap) {
-    min_overlap = std::max(a0, b0);
-    max_overlap = std::min(a1, b1);
-    return std::max(max_overlap - min_overlap, 0.0);
+ChVector2d IntersectSegmentWithHorizontal(const ChVector2d& a, const ChVector2d& b, double y_clip) {
+    const double dy = b.y() - a.y();
+    if (std::abs(dy) <= 1.0e-16) {
+        return ChVector2d(a.x(), y_clip);
+    }
+    const double t = (y_clip - a.y()) / dy;
+    return ChVector2d(a.x() + t * (b.x() - a.x()), y_clip);
+}
+
+std::vector<ChVector2d> ClipPolygonAgainstLeft(const std::vector<ChVector2d>& polygon, double min_u) {
+    std::vector<ChVector2d> clipped;
+    if (polygon.empty()) {
+        return clipped;
+    }
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& current = polygon[i];
+        const auto& prev = polygon[(i + polygon.size() - 1) % polygon.size()];
+        const bool inside_current = current.x() >= min_u - 1.0e-12;
+        const bool inside_prev = prev.x() >= min_u - 1.0e-12;
+        if (inside_current) {
+            if (!inside_prev) {
+                clipped.push_back(IntersectSegmentWithVertical(prev, current, min_u));
+            }
+            clipped.push_back(current);
+        } else if (inside_prev) {
+            clipped.push_back(IntersectSegmentWithVertical(prev, current, min_u));
+        }
+    }
+    return clipped;
+}
+
+std::vector<ChVector2d> ClipPolygonAgainstRight(const std::vector<ChVector2d>& polygon, double max_u) {
+    std::vector<ChVector2d> clipped;
+    if (polygon.empty()) {
+        return clipped;
+    }
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& current = polygon[i];
+        const auto& prev = polygon[(i + polygon.size() - 1) % polygon.size()];
+        const bool inside_current = current.x() <= max_u + 1.0e-12;
+        const bool inside_prev = prev.x() <= max_u + 1.0e-12;
+        if (inside_current) {
+            if (!inside_prev) {
+                clipped.push_back(IntersectSegmentWithVertical(prev, current, max_u));
+            }
+            clipped.push_back(current);
+        } else if (inside_prev) {
+            clipped.push_back(IntersectSegmentWithVertical(prev, current, max_u));
+        }
+    }
+    return clipped;
+}
+
+std::vector<ChVector2d> ClipPolygonAgainstBottom(const std::vector<ChVector2d>& polygon, double min_v) {
+    std::vector<ChVector2d> clipped;
+    if (polygon.empty()) {
+        return clipped;
+    }
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& current = polygon[i];
+        const auto& prev = polygon[(i + polygon.size() - 1) % polygon.size()];
+        const bool inside_current = current.y() >= min_v - 1.0e-12;
+        const bool inside_prev = prev.y() >= min_v - 1.0e-12;
+        if (inside_current) {
+            if (!inside_prev) {
+                clipped.push_back(IntersectSegmentWithHorizontal(prev, current, min_v));
+            }
+            clipped.push_back(current);
+        } else if (inside_prev) {
+            clipped.push_back(IntersectSegmentWithHorizontal(prev, current, min_v));
+        }
+    }
+    return clipped;
+}
+
+std::vector<ChVector2d> ClipPolygonAgainstTop(const std::vector<ChVector2d>& polygon, double max_v) {
+    std::vector<ChVector2d> clipped;
+    if (polygon.empty()) {
+        return clipped;
+    }
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& current = polygon[i];
+        const auto& prev = polygon[(i + polygon.size() - 1) % polygon.size()];
+        const bool inside_current = current.y() <= max_v + 1.0e-12;
+        const bool inside_prev = prev.y() <= max_v + 1.0e-12;
+        if (inside_current) {
+            if (!inside_prev) {
+                clipped.push_back(IntersectSegmentWithHorizontal(prev, current, max_v));
+            }
+            clipped.push_back(current);
+        } else if (inside_prev) {
+            clipped.push_back(IntersectSegmentWithHorizontal(prev, current, max_v));
+        }
+    }
+    return clipped;
+}
+
+std::vector<ChVector2d> ClipPolygonToRect(const std::vector<ChVector2d>& polygon,
+                                          double min_u,
+                                          double max_u,
+                                          double min_v,
+                                          double max_v) {
+    auto clipped = ClipPolygonAgainstLeft(polygon, min_u);
+    clipped = ClipPolygonAgainstRight(clipped, max_u);
+    clipped = ClipPolygonAgainstBottom(clipped, min_v);
+    clipped = ClipPolygonAgainstTop(clipped, max_v);
+    return clipped;
 }
 
 struct RedistributionContribution {
@@ -231,59 +282,31 @@ struct RedistributionContribution {
 };
 
 RedistributionContribution ComputeRedistributedContribution(const ChSDFBrickPairWrenchSample& sample,
-                                                            const ChVector3d& patch_origin_world,
-                                                            const std::vector<ProjectedRect>& support_rects,
-                                                            const ChVector3d& tangent_u,
-                                                            const ChVector3d& tangent_v,
+                                                            const ChSDFSheetLocalFootprint& footprint,
                                                             double sample_half_extent) {
     RedistributionContribution contribution;
-    if (!sample.active || sample.quadrature_area <= 1.0e-16 || sample_half_extent <= 1.0e-12 || support_rects.empty()) {
+    if (!sample.active || sample.quadrature_area <= 1.0e-16 || sample_half_extent <= 1.0e-12 || !footprint.HasPolygon()) {
         return contribution;
     }
 
     const ChVector3d point_world = ResolveSamplePointWorld(sample);
-    const ChVector3d rel = point_world - patch_origin_world;
-    const double center_u = Vdot(rel, tangent_u);
-    const double center_v = Vdot(rel, tangent_v);
+    const ChVector3d rel = point_world - footprint.origin_world;
+    const double center_u = Vdot(rel, footprint.tangent_u_world);
+    const double center_v = Vdot(rel, footprint.tangent_v_world);
     const double half = sample_half_extent;
 
-    double overlap_area_sum = 0;
-    double overlap_center_u_sum = 0;
-    double overlap_center_v_sum = 0;
-    for (const auto& support_rect : support_rects) {
-        if (!support_rect.valid) {
-            continue;
-        }
-
-        double min_u = 0;
-        double max_u = 0;
-        double min_v = 0;
-        double max_v = 0;
-        const double overlap_u =
-            OverlapInterval(center_u - half, center_u + half, support_rect.min_u, support_rect.max_u, min_u, max_u);
-        const double overlap_v =
-            OverlapInterval(center_v - half, center_v + half, support_rect.min_v, support_rect.max_v, min_v, max_v);
-        const double overlap_area = overlap_u * overlap_v;
-        if (overlap_area <= 1.0e-16) {
-            continue;
-        }
-
-        overlap_area_sum += overlap_area;
-        overlap_center_u_sum += overlap_area * 0.5 * (min_u + max_u);
-        overlap_center_v_sum += overlap_area * 0.5 * (min_v + max_v);
-    }
-
-    const double corrected_area = std::min(overlap_area_sum, sample.quadrature_area);
+    const auto clipped = ClipPolygonToRect(footprint.polygon_uv, center_u - half, center_u + half, center_v - half,
+                                           center_v + half);
+    const double corrected_area = std::min(PolygonArea(clipped), sample.quadrature_area);
     if (corrected_area <= 1.0e-16) {
         return contribution;
     }
 
     contribution.corrected_area = corrected_area;
-    const double inv_overlap = 1.0 / overlap_area_sum;
-    const double overlap_center_u = overlap_center_u_sum * inv_overlap;
-    const double overlap_center_v = overlap_center_v_sum * inv_overlap;
+    const ChVector2d overlap_center = PolygonCentroid(clipped);
     contribution.corrected_point_world =
-        patch_origin_world + tangent_u * overlap_center_u + tangent_v * overlap_center_v;
+        footprint.origin_world + footprint.tangent_u_world * overlap_center.x() +
+        footprint.tangent_v_world * overlap_center.y();
     return contribution;
 }
 
@@ -362,7 +385,6 @@ std::vector<ChSDFPatchBandAggregate> ChSDFPatchConsistencyBridge::BuildPatchBand
 ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyResult(
     const ChSDFPatchBandAggregate& band_patch,
     const ChSDFBrickPairWrenchResult& band_region,
-    const ChSDFSheetRegion& sheet_region,
     const ChSDFSheetPatch& sheet_patch,
     const ChFrameMoving<>& shape_a_frame_abs,
     const ChFrameMoving<>& shape_b_frame_abs,
@@ -400,25 +422,7 @@ ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyRe
     result.alpha = alpha;
     result.integrated_pressure_corrected = alpha * result.integrated_pressure_band;
 
-    if (settings.use_patch_local_redistribution) {
-        const ChVector3d patch_normal = SafeNormalized(sheet_patch.mean_normal_world, VECT_Y);
-        ChVector3d tangent_u;
-        ChVector3d tangent_v;
-        BuildOrthonormalBasis(patch_normal, tangent_u, tangent_v);
-
-        std::vector<ProjectedRect> support_rects;
-        support_rects.reserve(sheet_patch.sample_indices.size());
-        for (const auto sample_index : sheet_patch.sample_indices) {
-            if (sample_index >= sheet_region.samples.size()) {
-                continue;
-            }
-            const auto rect =
-                ProjectSheetSampleSupport(sheet_region.samples[sample_index], sheet_patch.centroid_world, tangent_u, tangent_v);
-            if (rect.valid) {
-                support_rects.push_back(rect);
-            }
-        }
-
+    if (settings.use_patch_local_redistribution && sheet_patch.support_footprint.HasPolygon()) {
         ChWrenchd redistributed_a = {VNULL, VNULL};
         ChWrenchd redistributed_b = {VNULL, VNULL};
         ChVector3d corrected_pressure_center_sum = VNULL;
@@ -442,8 +446,7 @@ ChSDFPatchConsistencyResult ChSDFPatchConsistencyBridge::BuildPatchConsistencyRe
                 sample_half_extent = 0.5 * band_region.region.sample_spacing;
             }
             const auto geom =
-                ComputeRedistributedContribution(band_sample, sheet_patch.centroid_world, support_rects, tangent_u,
-                                                 tangent_v, sample_half_extent);
+                ComputeRedistributedContribution(band_sample, sheet_patch.support_footprint, sample_half_extent);
             if (geom.corrected_area <= 1.0e-16 || !IsFiniteVector(geom.corrected_point_world)) {
                 continue;
             }
@@ -578,7 +581,7 @@ ChSDFPatchConsistencyPairResult ChSDFPatchConsistencyBridge::BuildPairConsistenc
             } else {
                 const auto patch_it = patch_by_id.find(aggregate.patch_id);
                 if (patch_it != patch_by_id.end()) {
-                    patch_result = BuildPatchConsistencyResult(aggregate, band_region, *sheet_region, *patch_it->second,
+                    patch_result = BuildPatchConsistencyResult(aggregate, band_region, *patch_it->second,
                                                                band_result.shape_a_frame_abs,
                                                                band_result.shape_b_frame_abs, settings);
                 } else {

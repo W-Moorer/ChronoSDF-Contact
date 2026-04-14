@@ -81,6 +81,18 @@ struct ChApi ChSDFSheetSeed {
     bool valid = false;
 };
 
+/// Explicit local footprint carried by a recovered sheet sample or patch.
+struct ChApi ChSDFSheetLocalFootprint {
+    ChVector3d origin_world = VNULL;
+    ChVector3d tangent_u_world = VNULL;
+    ChVector3d tangent_v_world = VNULL;
+    ChVector2d centroid_uv = ChVector2d(0, 0);
+    double area = 0;
+    std::vector<ChVector2d> polygon_uv;
+
+    bool HasPolygon() const { return polygon_uv.size() >= 3 && area > 1.0e-16; }
+};
+
 /// One collapsed sheet sample obtained by merging a unique fiber cluster of band seeds.
 struct ChApi ChSDFSheetFiberSample {
     std::size_t region_id = 0;
@@ -103,6 +115,7 @@ struct ChApi ChSDFSheetFiberSample {
 
     ChAABB source_bounds_world;
     ChAABB support_bbox_world;
+    ChSDFSheetLocalFootprint support_footprint;
 
     std::vector<std::size_t> source_sample_indices;
 
@@ -124,6 +137,7 @@ struct ChApi ChSDFSheetPatch {
 
     ChAABB bounds_world;
     ChAABB support_bbox_world;
+    ChSDFSheetLocalFootprint support_footprint;
 
     std::vector<std::size_t> sample_indices;
 

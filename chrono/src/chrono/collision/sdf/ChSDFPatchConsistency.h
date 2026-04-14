@@ -110,7 +110,6 @@ class ChApi ChSDFPatchConsistencyBridge {
     static ChSDFPatchConsistencyResult BuildPatchConsistencyResult(
         const ChSDFPatchBandAggregate& band_patch,
         const ChSDFBrickPairWrenchResult& band_region,
-        const ChSDFSheetRegion& sheet_region,
         const ChSDFSheetPatch& sheet_patch,
         const ChFrameMoving<>& shape_a_frame_abs,
         const ChFrameMoving<>& shape_b_frame_abs,

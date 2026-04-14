@@ -692,6 +692,7 @@ set(Chrono_collision_SOURCES
     collision/ChCollisionShapeTriangleMesh.cpp
     collision/sdf/ChNanoVDBLevelSet.cpp
     collision/sdf/ChSDFPotentialField.cpp
+    collision/sdf/ChSDFPotentialCalibration.cpp
     collision/sdf/ChSDFBrickPair.cpp
     collision/sdf/ChSDFPatchCandidate.cpp
     collision/sdf/ChSDFContactPair.cpp
@@ -735,6 +736,7 @@ set(Chrono_collision_HEADERS
     collision/ChCollisionShapeTriangleMesh.h
     collision/sdf/ChNanoVDBLevelSet.h
     collision/sdf/ChSDFPotentialField.h
+    collision/sdf/ChSDFPotentialCalibration.h
     collision/sdf/ChSDFBrickPair.h
     collision/sdf/ChSDFPatchCandidate.h
     collision/sdf/ChSDFContactPair.h
@@ -753,6 +755,7 @@ source_group(collision FILES ${Chrono_collision_SOURCES} ${Chrono_collision_HEAD
 set(Chrono_collision_sdf_SOURCES
     collision/sdf/ChNanoVDBLevelSet.cpp
     collision/sdf/ChSDFPotentialField.cpp
+    collision/sdf/ChSDFPotentialCalibration.cpp
     collision/sdf/ChSDFBrickPair.cpp
     collision/sdf/ChSDFPatchCandidate.cpp
     collision/sdf/ChSDFContactPair.cpp
@@ -769,6 +772,7 @@ set(Chrono_collision_sdf_SOURCES
 set(Chrono_collision_sdf_HEADERS
     collision/sdf/ChNanoVDBLevelSet.h
     collision/sdf/ChSDFPotentialField.h
+    collision/sdf/ChSDFPotentialCalibration.h
     collision/sdf/ChSDFBrickPair.h
     collision/sdf/ChSDFPatchCandidate.h
     collision/sdf/ChSDFContactPair.h

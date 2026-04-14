@@ -34,6 +34,7 @@
 #include <vector>
 
 #include <chrono/collision/ChCollisionShapeSDF.h>
+#include <chrono/collision/sdf/ChSDFPotentialCalibration.h>
 #include <chrono/collision/sdf/ChSDFShapePair.h>
 #include <chrono/core/ChRotation.h>
 #include <chrono/physics/ChBodyEasy.h>
@@ -927,11 +928,8 @@ int main(int argc, char* argv[]) {
     pressure_settings.resolution_scale_gain = 0;
 
     ChSDFPotentialFieldSettings potential_settings = sdf_shape_a->GetPotentialFieldSettings();
-    // For two identical rigid shapes, the equal-pressure surface lies near the
-    // overlap mid-surface, so each side contributes roughly half of the total
-    // depth. A small empirical correction keeps the PFC pressure scale aligned
-    // with the 4e5 * penetration benchmark baseline for the unit-box cases.
-    potential_settings.modulus = 2.22 * pressure_settings.stiffness;
+    potential_settings =
+        ChSDFPotentialCalibration::MakePlanarConsistentPotentialSettings(pressure_settings.stiffness, potential_settings);
     potential_settings.depth_scale = 1.0;
     potential_settings.depth_cap = -1;
     sdf_shape_a->SetPotentialFieldSettings(potential_settings);

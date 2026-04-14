@@ -260,6 +260,12 @@ ChVector2i QuantizeProjectedCoord(const ChVector3d& point_world,
                       static_cast<int>(std::lround(v / lateral_tolerance)));
 }
 
+struct ProjectedHullMetrics;
+ChSDFSheetLocalFootprint MakeSquareFootprint(const ChVector3d& origin_world,
+                                             const ChVector3d& normal_world,
+                                             double target_area);
+void UpdateBBoxFromFootprint(const ChSDFSheetLocalFootprint& footprint, ChAABB& bbox);
+
 void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
                          const std::vector<ChSDFSheetFiberSample>& samples,
                          const ChVector3d& fallback_normal) {
@@ -272,6 +278,7 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
     patch.mean_normal_world = VNULL;
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
+    patch.support_footprint = ChSDFSheetLocalFootprint();
 
     if (patch.sample_indices.empty()) {
         return;
@@ -304,6 +311,9 @@ void FinalizeLegacyPatch(ChSDFSheetPatch& patch,
     patch.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : patch.centroid_world;
     patch.mean_normal_world = SafeNormalized(normal_sum, fallback_normal);
+    patch.footprint_area = std::max(patch.footprint_area, patch.measure_area);
+    patch.support_footprint = MakeSquareFootprint(patch.centroid_world, patch.mean_normal_world, patch.footprint_area);
+    UpdateBBoxFromFootprint(patch.support_footprint, patch.support_bbox_world);
 }
 
 std::array<ChVector3d, 8> BuildAABBCorners(const ChAABB& box) {
@@ -313,6 +323,103 @@ std::array<ChVector3d, 8> BuildAABBCorners(const ChAABB& box) {
             ChVector3d(box.max.x(), box.max.y(), box.min.z()), ChVector3d(box.max.x(), box.max.y(), box.max.z())};
 }
 
+double SignedPolygonArea(const std::vector<ChVector2d>& polygon) {
+    if (polygon.size() < 3) {
+        return 0;
+    }
+
+    double twice_area = 0;
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size()];
+        twice_area += a.x() * b.y() - a.y() * b.x();
+    }
+    return 0.5 * twice_area;
+}
+
+double PolygonArea(const std::vector<ChVector2d>& polygon) {
+    return std::abs(SignedPolygonArea(polygon));
+}
+
+double Cross2D(const ChVector2d& a, const ChVector2d& b, const ChVector2d& c) {
+    const ChVector2d ab = b - a;
+    const ChVector2d ac = c - a;
+    return ab.x() * ac.y() - ab.y() * ac.x();
+}
+
+ChVector2d PolygonCentroid(const std::vector<ChVector2d>& polygon) {
+    if (polygon.empty()) {
+        return ChVector2d(0, 0);
+    }
+    if (polygon.size() < 3) {
+        ChVector2d centroid(0, 0);
+        for (const auto& point : polygon) {
+            centroid += point;
+        }
+        return centroid / static_cast<double>(polygon.size());
+    }
+
+    const double signed_area = SignedPolygonArea(polygon);
+    if (std::abs(signed_area) <= 1.0e-16) {
+        ChVector2d centroid(0, 0);
+        for (const auto& point : polygon) {
+            centroid += point;
+        }
+        return centroid / static_cast<double>(polygon.size());
+    }
+
+    ChVector2d centroid(0, 0);
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size()];
+        const double cross = a.x() * b.y() - a.y() * b.x();
+        centroid += (a + b) * cross;
+    }
+    return centroid / (6.0 * signed_area);
+}
+
+std::vector<ChVector2d> BuildConvexHull2D(std::vector<ChVector2d> points) {
+    if (points.empty()) {
+        return points;
+    }
+
+    std::sort(points.begin(), points.end(), [](const ChVector2d& a, const ChVector2d& b) {
+        return a.x() != b.x() ? a.x() < b.x() : a.y() < b.y();
+    });
+    points.erase(std::unique(points.begin(), points.end(),
+                             [](const ChVector2d& a, const ChVector2d& b) {
+                                 return std::abs(a.x() - b.x()) <= 1.0e-12 && std::abs(a.y() - b.y()) <= 1.0e-12;
+                             }),
+                 points.end());
+
+    if (points.size() <= 2) {
+        return points;
+    }
+
+    std::vector<ChVector2d> hull;
+    hull.reserve(points.size() * 2);
+
+    for (const auto& point : points) {
+        while (hull.size() >= 2 && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], point) <= 0) {
+            hull.pop_back();
+        }
+        hull.push_back(point);
+    }
+
+    const std::size_t lower_size = hull.size();
+    for (auto it = points.rbegin() + 1; it != points.rend(); ++it) {
+        while (hull.size() > lower_size && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], *it) <= 0) {
+            hull.pop_back();
+        }
+        hull.push_back(*it);
+    }
+
+    if (hull.size() > 1) {
+        hull.pop_back();
+    }
+    return hull;
+}
+
 struct ProjectedHullMetrics {
     double area = 0;
     double perimeter = 0;
@@ -320,14 +427,10 @@ struct ProjectedHullMetrics {
     double max_u = 0;
     double min_v = 0;
     double max_v = 0;
+    ChVector2d centroid_uv = ChVector2d(0, 0);
+    std::vector<ChVector2d> polygon_uv;
     bool valid = false;
 };
-
-double Cross2D(const ChVector2d& a, const ChVector2d& b, const ChVector2d& c) {
-    const ChVector2d ab = b - a;
-    const ChVector2d ac = c - a;
-    return ab.x() * ac.y() - ab.y() * ac.x();
-}
 
 ProjectedHullMetrics ComputeProjectedHullMetrics(const std::vector<ChVector3d>& support_points,
                                                  const ChVector3d& centroid_world,
@@ -360,64 +463,81 @@ ProjectedHullMetrics ComputeProjectedHullMetrics(const std::vector<ChVector3d>& 
         metrics.max_v = std::max(metrics.max_v, v);
     }
 
-    std::sort(projected.begin(), projected.end(), [](const ChVector2d& a, const ChVector2d& b) {
-        return a.x() != b.x() ? a.x() < b.x() : a.y() < b.y();
-    });
-    projected.erase(std::unique(projected.begin(), projected.end(),
-                                [](const ChVector2d& a, const ChVector2d& b) {
-                                    return std::abs(a.x() - b.x()) <= 1.0e-12 && std::abs(a.y() - b.y()) <= 1.0e-12;
-                                }),
-                    projected.end());
-
-    if (projected.size() == 1) {
+    metrics.polygon_uv = BuildConvexHull2D(std::move(projected));
+    if (metrics.polygon_uv.size() == 1) {
         metrics.valid = true;
+        metrics.centroid_uv = metrics.polygon_uv.front();
         return metrics;
     }
 
-    std::vector<ChVector2d> hull;
-    hull.reserve(projected.size() * 2);
-
-    for (const auto& point : projected) {
-        while (hull.size() >= 2 && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], point) <= 0) {
-            hull.pop_back();
-        }
-        hull.push_back(point);
-    }
-
-    const std::size_t lower_size = hull.size();
-    for (auto it = projected.rbegin() + 1; it != projected.rend(); ++it) {
-        while (hull.size() > lower_size && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], *it) <= 0) {
-            hull.pop_back();
-        }
-        hull.push_back(*it);
-    }
-
-    if (hull.size() > 1) {
-        hull.pop_back();
-    }
-
-    if (hull.empty()) {
+    if (metrics.polygon_uv.empty()) {
         return metrics;
     }
 
-    if (hull.size() == 1) {
-        metrics.valid = true;
-        return metrics;
+    for (std::size_t i = 0; i < metrics.polygon_uv.size(); ++i) {
+        const auto& a = metrics.polygon_uv[i];
+        const auto& b = metrics.polygon_uv[(i + 1) % metrics.polygon_uv.size()];
+        metrics.perimeter += (b - a).Length();
     }
 
-    double twice_area = 0;
-    double perimeter = 0;
-    for (std::size_t i = 0; i < hull.size(); ++i) {
-        const auto& a = hull[i];
-        const auto& b = hull[(i + 1) % hull.size()];
-        twice_area += a.x() * b.y() - a.y() * b.x();
-        perimeter += (b - a).Length();
-    }
-
-    metrics.area = 0.5 * std::abs(twice_area);
-    metrics.perimeter = perimeter;
+    metrics.area = PolygonArea(metrics.polygon_uv);
+    metrics.centroid_uv = PolygonCentroid(metrics.polygon_uv);
     metrics.valid = true;
     return metrics;
+}
+
+ChSDFSheetLocalFootprint MakeSquareFootprint(const ChVector3d& origin_world,
+                                             const ChVector3d& normal_world,
+                                             double target_area) {
+    ChSDFSheetLocalFootprint footprint;
+    footprint.origin_world = origin_world;
+    BuildOrthonormalBasis(normal_world, footprint.tangent_u_world, footprint.tangent_v_world);
+    if (target_area <= 1.0e-16) {
+        return footprint;
+    }
+
+    const double half_extent = 0.5 * std::sqrt(target_area);
+    footprint.polygon_uv = {ChVector2d(-half_extent, -half_extent), ChVector2d(half_extent, -half_extent),
+                            ChVector2d(half_extent, half_extent), ChVector2d(-half_extent, half_extent)};
+    footprint.area = PolygonArea(footprint.polygon_uv);
+    footprint.centroid_uv = PolygonCentroid(footprint.polygon_uv);
+    return footprint;
+}
+
+ChSDFSheetLocalFootprint BuildScaledProjectedFootprint(const ProjectedHullMetrics& hull,
+                                                       const ChVector3d& origin_world,
+                                                       const ChVector3d& normal_world,
+                                                       double target_area) {
+    const double min_reasonable_hull_area = std::max(1.0e-12, 0.10 * std::max(target_area, 0.0));
+    if (!hull.valid || hull.polygon_uv.size() < 3 || target_area <= 1.0e-16 || hull.area < min_reasonable_hull_area) {
+        return MakeSquareFootprint(origin_world, normal_world, target_area);
+    }
+
+    ChSDFSheetLocalFootprint footprint;
+    footprint.origin_world = origin_world;
+    BuildOrthonormalBasis(normal_world, footprint.tangent_u_world, footprint.tangent_v_world);
+    footprint.polygon_uv = hull.polygon_uv;
+    const double current_area = std::max(hull.area, 1.0e-16);
+    const ChVector2d centroid_uv = PolygonCentroid(footprint.polygon_uv);
+    const double scale = std::sqrt(target_area / current_area);
+    for (auto& vertex : footprint.polygon_uv) {
+        vertex = centroid_uv + (vertex - centroid_uv) * scale;
+    }
+    footprint.area = PolygonArea(footprint.polygon_uv);
+    footprint.centroid_uv = PolygonCentroid(footprint.polygon_uv);
+    return footprint;
+}
+
+void UpdateBBoxFromFootprint(const ChSDFSheetLocalFootprint& footprint, ChAABB& bbox) {
+    bbox = ChAABB();
+    if (!footprint.HasPolygon()) {
+        return;
+    }
+    for (const auto& vertex_uv : footprint.polygon_uv) {
+        const ChVector3d vertex_world = footprint.origin_world + footprint.tangent_u_world * vertex_uv.x() +
+                                        footprint.tangent_v_world * vertex_uv.y();
+        bbox += vertex_world;
+    }
 }
 
 double ResolvePatchRecoveryRadius(double patch_measure_area, std::size_t support_seed_count, double sheet_scale) {
@@ -504,6 +624,7 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     patch.mean_normal_world = VNULL;
     patch.bounds_world = ChAABB();
     patch.support_bbox_world = ChAABB();
+    patch.support_footprint = ChSDFSheetLocalFootprint();
 
     if (patch.sample_indices.empty()) {
         return;
@@ -615,20 +736,20 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     }
     patch.footprint_area = std::max(recovered_area, patch.measure_area);
 
-    patch.support_bbox_world = ChAABB();
-    if (support_metrics.valid || occupancy_metrics.valid) {
-        ChVector3d tangent_u;
-        ChVector3d tangent_v;
-        BuildOrthonormalBasis(patch.mean_normal_world, tangent_u, tangent_v);
-        const std::array<ChVector3d, 4> corners = {
-            patch.centroid_world + tangent_u * (min_u - recovery_radius_u) + tangent_v * (min_v - recovery_radius_v),
-            patch.centroid_world + tangent_u * (min_u - recovery_radius_u) + tangent_v * (max_v + recovery_radius_v),
-            patch.centroid_world + tangent_u * (max_u + recovery_radius_u) + tangent_v * (min_v - recovery_radius_v),
-            patch.centroid_world + tangent_u * (max_u + recovery_radius_u) + tangent_v * (max_v + recovery_radius_v)};
-        for (const auto& corner : corners) {
-            patch.support_bbox_world += corner;
-        }
-    } else {
+    patch.support_footprint.origin_world = patch.centroid_world;
+    BuildOrthonormalBasis(patch.mean_normal_world, patch.support_footprint.tangent_u_world,
+                          patch.support_footprint.tangent_v_world);
+    patch.support_footprint.polygon_uv = {ChVector2d(min_u - recovery_radius_u, min_v - recovery_radius_v),
+                                          ChVector2d(max_u + recovery_radius_u, min_v - recovery_radius_v),
+                                          ChVector2d(max_u + recovery_radius_u, max_v + recovery_radius_v),
+                                          ChVector2d(min_u - recovery_radius_u, max_v + recovery_radius_v)};
+    patch.support_footprint.area = PolygonArea(patch.support_footprint.polygon_uv);
+    patch.support_footprint.centroid_uv = PolygonCentroid(patch.support_footprint.polygon_uv);
+    if (!patch.support_footprint.HasPolygon()) {
+        patch.support_footprint = MakeSquareFootprint(patch.centroid_world, patch.mean_normal_world, patch.footprint_area);
+    }
+    UpdateBBoxFromFootprint(patch.support_footprint, patch.support_bbox_world);
+    if (patch.support_bbox_world.IsInverted()) {
         ExpandProjectedSupportBBox(patch.support_bbox_world, patch.centroid_world, patch.mean_normal_world, support_points,
                                    std::max(patch.footprint_area, patch.measure_area));
     }
@@ -1034,13 +1155,16 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
         }
     }
 
-    const std::array<ChVector3d, 4> corners = {
-        sample.centroid_world + tangent_u * half_u + tangent_v * half_v,
-        sample.centroid_world + tangent_u * half_u - tangent_v * half_v,
-        sample.centroid_world - tangent_u * half_u + tangent_v * half_v,
-        sample.centroid_world - tangent_u * half_u - tangent_v * half_v};
-    for (const auto& corner : corners) {
-        sample.support_bbox_world += corner;
+    sample.support_footprint.origin_world = sample.centroid_world;
+    sample.support_footprint.tangent_u_world = tangent_u;
+    sample.support_footprint.tangent_v_world = tangent_v;
+    sample.support_footprint.polygon_uv = {ChVector2d(-half_u, -half_v), ChVector2d(half_u, -half_v),
+                                           ChVector2d(half_u, half_v), ChVector2d(-half_u, half_v)};
+    sample.support_footprint.area = PolygonArea(sample.support_footprint.polygon_uv);
+    sample.support_footprint.centroid_uv = PolygonCentroid(sample.support_footprint.polygon_uv);
+    UpdateBBoxFromFootprint(sample.support_footprint, sample.support_bbox_world);
+    for (const auto& point : seed_points) {
+        sample.support_bbox_world += point;
     }
 
     return sample;
