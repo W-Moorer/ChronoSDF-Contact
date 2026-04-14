@@ -58,6 +58,59 @@ ChVector3d SafeNormalized(const ChVector3d& v, const ChVector3d& fallback = VECT
     return length > 1.0e-12 ? v / length : fallback;
 }
 
+double NormalCosine(const ChVector3d& a, const ChVector3d& b) {
+    const double la = a.Length();
+    const double lb = b.Length();
+    if (la <= 1.0e-12 || lb <= 1.0e-12) {
+        return -1.0;
+    }
+    return Vdot(a / la, b / lb);
+}
+
+void BuildOrthonormalBasis(const ChVector3d& normal, ChVector3d& tangent_u, ChVector3d& tangent_v) {
+    const ChVector3d n = SafeNormalized(normal, VECT_Y);
+    const ChVector3d reference = (std::abs(n.y()) < 0.9) ? VECT_Y : VECT_X;
+    tangent_u = SafeNormalized(Vcross(reference, n), VECT_X);
+    tangent_v = SafeNormalized(Vcross(n, tangent_u), VECT_Z);
+}
+
+double ResolveLateralTolerance(double spacing, const ChSDFSheetCollapseSettings& settings) {
+    if (settings.fiber_lateral_tolerance > 0) {
+        return settings.fiber_lateral_tolerance;
+    }
+    if (spacing > 0) {
+        return spacing;
+    }
+    return 1.0;
+}
+
+ChVector2i QuantizeProjectedCoord(const ChVector3d& point_world,
+                                  const ChVector3d& projection_origin,
+                                  const ChVector3d& region_normal,
+                                  const ChVector3d& sample_normal,
+                                  const ChVector3d& tangent_u,
+                                  const ChVector3d& tangent_v,
+                                  double lateral_tolerance) {
+    const ChVector3d normal = SafeNormalized(region_normal, VECT_Y);
+    const ChVector3d projection_dir = SafeNormalized(sample_normal, normal);
+
+    ChVector3d projected = point_world;
+    const double denom = Vdot(projection_dir, normal);
+    if (std::abs(denom) > 1.0e-8) {
+        const double alpha = Vdot(point_world - projection_origin, normal) / denom;
+        projected = point_world - alpha * projection_dir;
+    } else {
+        projected = point_world - Vdot(point_world - projection_origin, normal) * normal;
+    }
+
+    const ChVector3d rel = projected - projection_origin;
+    const double u = Vdot(rel, tangent_u);
+    const double v = Vdot(rel, tangent_v);
+
+    return ChVector2i(static_cast<int>(std::lround(u / lateral_tolerance)),
+                      static_cast<int>(std::lround(v / lateral_tolerance)));
+}
+
 ChVector3d ResolveRegionNormal(const ChSDFBrickPairWrenchResult& band_region) {
     ChVector3d normal_sum = band_region.region.mean_normal_world;
     if (normal_sum.Length2() > 1.0e-24) {
@@ -156,17 +209,18 @@ void FinalizePatch(ChSDFSheetPatch& patch,
 
 std::vector<ChSDFSheetPatch> BuildPatches(const std::vector<ChSDFSheetFiberSample>& samples,
                                           int neighbor_mode,
-                                          const ChVector3d& fallback_normal) {
+                                          const ChVector3d& fallback_normal,
+                                          double normal_cosine_threshold) {
     std::vector<ChSDFSheetPatch> patches;
     if (samples.empty()) {
         return patches;
     }
 
-    std::unordered_map<FiberKey, std::size_t, FiberKeyHash> sample_by_coord;
+    std::unordered_map<FiberKey, std::vector<std::size_t>, FiberKeyHash> sample_by_coord;
     sample_by_coord.reserve(samples.size());
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const auto& sample = samples[i];
-        sample_by_coord.emplace(FiberKey{sample.lattice_coord.x(), sample.lattice_coord.y()}, i);
+        sample_by_coord[FiberKey{sample.lattice_coord.x(), sample.lattice_coord.y()}].push_back(i);
     }
 
     const auto neighbor_offsets = BuildPatchNeighborOffsets(neighbor_mode);
@@ -190,15 +244,33 @@ std::vector<ChSDFSheetPatch> BuildPatches(const std::vector<ChSDFSheetFiberSampl
             patch.sample_indices.push_back(current);
 
             const auto& coord = samples[current].lattice_coord;
+            std::vector<FiberKey> candidate_coords;
+            candidate_coords.reserve(neighbor_offsets.size() + 1);
+            candidate_coords.push_back(FiberKey{coord.x(), coord.y()});
             for (const auto& offset : neighbor_offsets) {
-                FiberKey neighbor{coord.x() + offset.x(), coord.y() + offset.y()};
+                candidate_coords.push_back(FiberKey{coord.x() + offset.x(), coord.y() + offset.y()});
+            }
+
+            for (const auto& neighbor : candidate_coords) {
                 auto it = sample_by_coord.find(neighbor);
-                if (it == sample_by_coord.end() || visited[it->second]) {
+                if (it == sample_by_coord.end()) {
                     continue;
                 }
 
-                visited[it->second] = 1;
-                frontier.push(it->second);
+                for (const auto neighbor_index : it->second) {
+                    if (visited[neighbor_index]) {
+                        continue;
+                    }
+
+                    const double cosine =
+                        NormalCosine(samples[current].normal_world, samples[neighbor_index].normal_world);
+                    if (normal_cosine_threshold > -1 && cosine < normal_cosine_threshold) {
+                        continue;
+                    }
+
+                    visited[neighbor_index] = 1;
+                    frontier.push(neighbor_index);
+                }
             }
         }
 
@@ -246,8 +318,29 @@ ChSDFSheetRegion ChSDFSheetBuilder::BuildRegion(const ChSDFBrickPairWrenchResult
 
     const ChVector3d fallback_normal = ResolveRegionNormal(band_region);
     region.dominant_axis = ComputeDominantAxis(fallback_normal);
+    const double spacing = ResolveRegionSpacing(band_region);
+    const double lateral_tolerance = ResolveLateralTolerance(spacing, settings);
+    ChVector3d tangent_u;
+    ChVector3d tangent_v;
+    BuildOrthonormalBasis(fallback_normal, tangent_u, tangent_v);
 
-    std::unordered_map<FiberKey, FiberAccumulator, FiberKeyHash> fibers;
+    ChVector3d projection_origin = band_region.region.centroid_world;
+    if (projection_origin.Length2() <= 1.0e-24) {
+        double weight_sum = 0;
+        projection_origin = VNULL;
+        for (const auto& sample : band_region.samples) {
+            if (!sample.active || sample.quadrature_area <= 1.0e-16) {
+                continue;
+            }
+            projection_origin += sample.region_sample.point_world * sample.quadrature_area;
+            weight_sum += sample.quadrature_area;
+        }
+        if (weight_sum > 0) {
+            projection_origin /= weight_sum;
+        }
+    }
+
+    std::unordered_map<FiberKey, std::vector<FiberAccumulator>, FiberKeyHash> fibers;
     fibers.reserve(band_region.samples.size());
 
     for (std::size_t sample_index = 0; sample_index < band_region.samples.size(); ++sample_index) {
@@ -256,29 +349,51 @@ ChSDFSheetRegion ChSDFSheetBuilder::BuildRegion(const ChSDFBrickPairWrenchResult
             continue;
         }
 
-        const ChVector2i lattice_coord = ComputeLatticeCoord(sample.region_sample.coord, region.dominant_axis);
+        const ChVector3d sample_normal = SafeNormalized(sample.region_sample.contact_normal_world, fallback_normal);
+        ChVector2i lattice_coord = ComputeLatticeCoord(sample.region_sample.coord, region.dominant_axis);
+        if (settings.use_local_fiber_projection) {
+            lattice_coord = QuantizeProjectedCoord(sample.region_sample.point_world, projection_origin, fallback_normal,
+                                                  sample_normal, tangent_u, tangent_v, lateral_tolerance);
+        }
+
         const FiberKey key{lattice_coord.x(), lattice_coord.y()};
-        auto& fiber = fibers[key];
-        fiber.dominant_axis = region.dominant_axis;
-        fiber.lattice_coord = lattice_coord;
-        fiber.measure_area += sample.quadrature_area;
-        fiber.area_centroid_sum += sample.region_sample.point_world * sample.quadrature_area;
-        fiber.normal_sum += sample.region_sample.contact_normal_world * sample.quadrature_area;
-        fiber.force_sum += sample.force_world;
-        fiber.bounds_world += sample.region_sample.point_world;
-        fiber.source_sample_indices.push_back(sample_index);
+        auto& bucket = fibers[key];
+
+        FiberAccumulator* fiber = nullptr;
+        for (auto& candidate : bucket) {
+            const ChVector3d candidate_normal =
+                candidate.normal_sum.Length2() > 1.0e-24 ? SafeNormalized(candidate.normal_sum, fallback_normal)
+                                                         : fallback_normal;
+            const double cosine = NormalCosine(sample_normal, candidate_normal);
+            if (settings.fiber_normal_cosine <= -1 || cosine >= settings.fiber_normal_cosine) {
+                fiber = &candidate;
+                break;
+            }
+        }
+        if (!fiber) {
+            bucket.emplace_back();
+            fiber = &bucket.back();
+            fiber->dominant_axis = region.dominant_axis;
+            fiber->lattice_coord = lattice_coord;
+        }
+
+        fiber->measure_area += sample.quadrature_area;
+        fiber->area_centroid_sum += sample.region_sample.point_world * sample.quadrature_area;
+        fiber->normal_sum += sample.region_sample.contact_normal_world * sample.quadrature_area;
+        fiber->force_sum += sample.force_world;
+        fiber->bounds_world += sample.region_sample.point_world;
+        fiber->source_sample_indices.push_back(sample_index);
 
         const double pressure_weight = std::max(sample.pressure * sample.quadrature_area, 0.0);
-        fiber.pressure_weight += pressure_weight;
-        fiber.pressure_center_sum += sample.region_sample.point_world * pressure_weight;
+        fiber->pressure_weight += pressure_weight;
+        fiber->pressure_center_sum += sample.region_sample.point_world * pressure_weight;
     }
 
     if (fibers.empty()) {
         return region;
     }
 
-    const double spacing = ResolveRegionSpacing(band_region);
-    const double footprint_area = spacing > 0 ? spacing * spacing : 0.0;
+    const double footprint_area = lateral_tolerance * lateral_tolerance;
 
     region.samples.reserve(fibers.size());
 
@@ -290,7 +405,9 @@ ChSDFSheetRegion ChSDFSheetBuilder::BuildRegion(const ChSDFBrickPairWrenchResult
     std::vector<std::pair<FiberKey, FiberAccumulator>> ordered_fibers;
     ordered_fibers.reserve(fibers.size());
     for (auto& item : fibers) {
-        ordered_fibers.push_back({item.first, std::move(item.second)});
+        for (auto& fiber : item.second) {
+            ordered_fibers.push_back({item.first, std::move(fiber)});
+        }
     }
     std::stable_sort(ordered_fibers.begin(), ordered_fibers.end(),
                      [](const auto& a, const auto& b) { return a.first.a != b.first.a ? a.first.a < b.first.a : a.first.b < b.first.b; });
@@ -338,7 +455,8 @@ ChSDFSheetRegion ChSDFSheetBuilder::BuildRegion(const ChSDFBrickPairWrenchResult
     region.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : region.centroid_world;
     region.support_bbox_world = region.bounds_world;
-    region.patches = BuildPatches(region.samples, settings.patch_neighbor_mode, region.mean_normal_world);
+    region.patches =
+        BuildPatches(region.samples, settings.patch_neighbor_mode, region.mean_normal_world, settings.fiber_normal_cosine);
     region.patch_count = region.patches.size();
     region.largest_patch_area = 0;
     for (const auto& patch : region.patches) {

@@ -27,7 +27,7 @@ namespace chrono {
 /// Settings for the zero-thickness sheet layer collapsed out of the band-mechanics cells.
 struct ChApi ChSDFSheetCollapseSettings {
     bool enable = true;
-    bool use_local_fiber_projection = false;
+    bool use_local_fiber_projection = true;
     double fiber_lateral_tolerance = -1;
     double fiber_normal_cosine = 0.7;
     double min_sheet_sample_area = 0;
