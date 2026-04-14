@@ -577,6 +577,62 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
     return sample;
 }
 
+double EquivalentSupportRadius(const ChSDFSheetFiberSample& sample) {
+    const double area = std::max(sample.footprint_area, sample.measure_area);
+    return area > 0 ? std::sqrt(area / CH_PI) : 0.0;
+}
+
+double AABBDistance(const ChAABB& a, const ChAABB& b) {
+    const auto axis_gap = [](double a_min, double a_max, double b_min, double b_max) {
+        if (a_max < b_min) {
+            return b_min - a_max;
+        }
+        if (b_max < a_min) {
+            return a_min - b_max;
+        }
+        return 0.0;
+    };
+
+    const double dx = axis_gap(a.min.x(), a.max.x(), b.min.x(), b.max.x());
+    const double dy = axis_gap(a.min.y(), a.max.y(), b.min.y(), b.max.y());
+    const double dz = axis_gap(a.min.z(), a.max.z(), b.min.z(), b.max.z());
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+bool FibersBelongToSamePatch(const ChSDFSheetFiberSample& a,
+                             const ChSDFSheetFiberSample& b,
+                             double patch_connection_radius,
+                             double patch_normal_cosine) {
+    const double cosine = NormalCosine(a.normal_world, b.normal_world);
+    const double radius_a = EquivalentSupportRadius(a);
+    const double radius_b = EquivalentSupportRadius(b);
+    const double adaptive_tangent_tol = patch_connection_radius + radius_a + radius_b;
+    const double adaptive_plane_tol = 0.5 * patch_connection_radius + 0.25 * (radius_a + radius_b);
+
+    const ChVector3d n_bar = SafeNormalized(a.normal_world + b.normal_world, a.normal_world);
+    const ChVector3d delta = b.centroid_world - a.centroid_world;
+    const double delta_n = std::abs(Vdot(n_bar, delta));
+    const double delta_t = (delta - n_bar * Vdot(n_bar, delta)).Length();
+    const double bbox_gap = AABBDistance(a.support_bbox_world, b.support_bbox_world);
+
+    const bool centroid_adjacent = delta_t <= adaptive_tangent_tol + 1.0e-12 &&
+                                   delta_n <= adaptive_plane_tol + 1.0e-12;
+    const bool bbox_adjacent = bbox_gap <= (patch_connection_radius + 0.25 * (radius_a + radius_b) + 1.0e-12);
+
+    if (!centroid_adjacent && !bbox_adjacent) {
+        return false;
+    }
+
+    const double strict_cosine = patch_normal_cosine;
+    const double overlap_cosine = std::min(patch_normal_cosine, std::cos(CH_PI / 4.0));
+    const double required_cosine = bbox_adjacent ? overlap_cosine : strict_cosine;
+    if (required_cosine > -1 && cosine < required_cosine) {
+        return false;
+    }
+
+    return true;
+}
+
 std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSample>& samples,
                                              double patch_connection_radius,
                                              double patch_normal_cosine) {
@@ -585,7 +641,12 @@ std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSa
         return patches;
     }
 
-    const double cell_size = std::max(patch_connection_radius, 1.0e-6);
+    double max_support_radius = 0;
+    for (const auto& sample : samples) {
+        max_support_radius = std::max(max_support_radius, EquivalentSupportRadius(sample));
+    }
+
+    const double cell_size = std::max(patch_connection_radius + 2.0 * max_support_radius, 1.0e-6);
     std::unordered_map<SpatialHashKey, std::vector<std::size_t>, SpatialHashKeyHash> buckets;
     buckets.reserve(samples.size());
     for (std::size_t i = 0; i < samples.size(); ++i) {
@@ -609,15 +670,10 @@ std::vector<ChSDFSheetPatch> BuildPatchGraph(const std::vector<ChSDFSheetFiberSa
                             continue;
                         }
 
-                        const double cosine = NormalCosine(samples[i].normal_world, samples[j].normal_world);
-                        if (patch_normal_cosine > -1 && cosine < patch_normal_cosine) {
-                            continue;
+                        if (FibersBelongToSamePatch(samples[i], samples[j], patch_connection_radius,
+                                                    patch_normal_cosine)) {
+                            uf.Unite(i, j);
                         }
-                        if ((samples[j].centroid_world - samples[i].centroid_world).Length() >
-                            patch_connection_radius + 1.0e-12) {
-                            continue;
-                        }
-                        uf.Unite(i, j);
                     }
                 }
             }
