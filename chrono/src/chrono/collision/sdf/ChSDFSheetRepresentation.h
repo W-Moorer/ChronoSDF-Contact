@@ -65,6 +65,7 @@ struct ChApi ChSDFSheetSeed {
     std::size_t region_id = 0;
     std::size_t source_sample_index = 0;
 
+    int source_carrier_axis = -1;
     ChVector3i source_coord = ChVector3i(0, 0, 0);
     ChVector3d seed_world = VNULL;
     ChVector3d seed_normal_world = VNULL;
@@ -96,6 +97,7 @@ struct ChApi ChSDFSheetLocalFootprint {
 
 /// One raw support witness retained before patch-level footprint reconstruction.
 struct ChApi ChSDFSheetSupportEvidence {
+    int source_carrier_axis = -1;
     ChVector3i source_coord = ChVector3i(0, 0, 0);
     ChVector3d point_world = VNULL;
     ChVector3d seed_world = VNULL;
@@ -106,6 +108,7 @@ struct ChApi ChSDFSheetSupportEvidence {
 
 /// One discrete support cell on the local patch plane built from raw support evidence.
 struct ChApi ChSDFPatchPlaneSupportCell {
+    int carrier_axis = -1;
     ChVector2i cell_ij = ChVector2i(0, 0);
     ChVector2d center_uv = ChVector2d(0, 0);
     ChVector2d half_extents_uv = ChVector2d(0, 0);

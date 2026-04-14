@@ -32,6 +32,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -206,11 +207,16 @@ struct PatchAreaDiagnosticRecord {
     std::size_t support_seed_count = 0;
     std::size_t support_cell_count = 0;
     std::size_t shell_cell_count = 0;
+    std::size_t support_cell_axis_count = 0;
+    std::size_t support_cell_bbox_count = 0;
+    int support_cell_u_span = 0;
+    int support_cell_v_span = 0;
     std::size_t polygon_vertex_count = 0;
     double measure_area = 0;
     double footprint_area = 0;
     double footprint_polygon_area = 0;
     double support_bbox_projected_area = 0;
+    double support_cell_fill_ratio = 0;
     double polygon_to_footprint_ratio = 0;
     double bbox_to_footprint_ratio = 0;
     double bbox_to_polygon_ratio = 0;
@@ -485,6 +491,31 @@ DistributedEvaluation EvaluateDistributed(const std::string& scenario_name,
                 patch_record.shell_cell_count =
                     std::count_if(patch.support_cells.begin(), patch.support_cells.end(),
                                   [](const ChSDFPatchPlaneSupportCell& cell) { return cell.shell; });
+                if (!patch.support_cells.empty()) {
+                    int min_u = std::numeric_limits<int>::max();
+                    int max_u = std::numeric_limits<int>::min();
+                    int min_v = std::numeric_limits<int>::max();
+                    int max_v = std::numeric_limits<int>::min();
+                    std::set<int> axes;
+                    for (const auto& cell : patch.support_cells) {
+                        min_u = std::min(min_u, cell.cell_ij.x());
+                        max_u = std::max(max_u, cell.cell_ij.x());
+                        min_v = std::min(min_v, cell.cell_ij.y());
+                        max_v = std::max(max_v, cell.cell_ij.y());
+                        axes.insert(cell.carrier_axis);
+                    }
+                    patch_record.support_cell_axis_count = axes.size();
+                    patch_record.support_cell_u_span = max_u - min_u + 1;
+                    patch_record.support_cell_v_span = max_v - min_v + 1;
+                    patch_record.support_cell_bbox_count =
+                        static_cast<std::size_t>(patch_record.support_cell_u_span) *
+                        static_cast<std::size_t>(patch_record.support_cell_v_span);
+                    if (patch_record.support_cell_bbox_count > 0) {
+                        patch_record.support_cell_fill_ratio =
+                            static_cast<double>(patch_record.support_cell_count) /
+                            static_cast<double>(patch_record.support_cell_bbox_count);
+                    }
+                }
                 patch_record.polygon_vertex_count = patch.support_footprint.polygon_uv.size();
                 patch_record.measure_area = patch.measure_area;
                 patch_record.footprint_area = patch.footprint_area;
@@ -931,14 +962,17 @@ void WritePatchAreaDiagnosticsCsv(const fs::path& path, const std::vector<PatchA
     std::ofstream out(path);
     out << std::setprecision(16);
     out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,region_id,patch_id,support_columns,"
-           "support_seed_count,support_cell_count,shell_cell_count,polygon_vertex_count,measure_area,footprint_area,footprint_polygon_area,"
+           "support_seed_count,support_cell_count,shell_cell_count,support_cell_axis_count,support_cell_bbox_count,"
+           "support_cell_u_span,support_cell_v_span,support_cell_fill_ratio,polygon_vertex_count,measure_area,footprint_area,footprint_polygon_area,"
            "support_bbox_projected_area,polygon_to_footprint_ratio,bbox_to_footprint_ratio,bbox_to_polygon_ratio\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
             << record.tilt_z_deg << ',' << record.offset_x << ',' << record.region_id << ',' << record.patch_id << ','
             << record.support_columns << ',' << record.support_seed_count << ',' << record.support_cell_count << ','
-            << record.shell_cell_count << ',' << record.polygon_vertex_count << ','
+            << record.shell_cell_count << ',' << record.support_cell_axis_count << ',' << record.support_cell_bbox_count
+            << ',' << record.support_cell_u_span << ',' << record.support_cell_v_span << ','
+            << record.support_cell_fill_ratio << ',' << record.polygon_vertex_count << ','
             << record.measure_area << ',' << record.footprint_area << ',' << record.footprint_polygon_area << ','
             << record.support_bbox_projected_area << ',' << record.polygon_to_footprint_ratio << ','
             << record.bbox_to_footprint_ratio << ',' << record.bbox_to_polygon_ratio << '\n';
