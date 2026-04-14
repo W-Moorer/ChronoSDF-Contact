@@ -30,6 +30,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -87,6 +88,9 @@ struct BenchmarkRecord {
     double torque_z = 0;
 
     double active_area = 0;
+    double area_occ = 0;
+    double area_band = 0;
+    double area_sheet = 0;
     double max_penetration = 0;
     double pressure_center_x = 0;
     double eval_ms = 0;
@@ -106,6 +110,9 @@ struct BenchmarkSummary {
     double torque_z_rmse = 0;
     double torque_z_max_abs = 0;
     double active_area_rmse = 0;
+    double area_occ_rmse = 0;
+    double area_band_rmse = 0;
+    double area_sheet_rmse = 0;
     double pressure_center_x_rmse = 0;
 };
 
@@ -187,6 +194,52 @@ double ComputePressureCenterX(const ChSDFShapePairContactResult& result) {
     return weight_sum > 0 ? weighted_x / weight_sum : 0.0;
 }
 
+int DominantAxis(const ChVector3d& normal) {
+    const ChVector3d abs_normal(std::abs(normal.x()), std::abs(normal.y()), std::abs(normal.z()));
+    if (abs_normal.x() >= abs_normal.y() && abs_normal.x() >= abs_normal.z()) {
+        return 0;
+    }
+    if (abs_normal.y() >= abs_normal.x() && abs_normal.y() >= abs_normal.z()) {
+        return 1;
+    }
+    return 2;
+}
+
+std::uint64_t CollapseKey(const ChVector3i& coord, int dominant_axis) {
+    const int a = dominant_axis == 0 ? coord.y() : coord.x();
+    const int b = dominant_axis == 2 ? coord.y() : coord.z();
+    const std::uint32_t ua = static_cast<std::uint32_t>(a);
+    const std::uint32_t ub = static_cast<std::uint32_t>(b);
+    return (static_cast<std::uint64_t>(ua) << 32) | static_cast<std::uint64_t>(ub);
+}
+
+double ComputeCollapsedSheetArea(const ChSDFShapePairContactResult& result, double spacing) {
+    if (spacing <= 0) {
+        return 0.0;
+    }
+
+    const double cell_area = spacing * spacing;
+    double collapsed_area = 0.0;
+
+    for (const auto& region : result.regions) {
+        if (!region.HasActiveContact()) {
+            continue;
+        }
+
+        const int dominant_axis = DominantAxis(region.region.mean_normal_world);
+        std::unordered_set<std::uint64_t> occupied_columns;
+        occupied_columns.reserve(region.samples.size());
+
+        for (const auto& sample : region.samples) {
+            occupied_columns.insert(CollapseKey(sample.region_sample.coord, dominant_axis));
+        }
+
+        collapsed_area += static_cast<double>(occupied_columns.size()) * cell_area;
+    }
+
+    return collapsed_area;
+}
+
 BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
                                     const PoseSample& pose,
                                     ChBody* moving_body,
@@ -228,6 +281,10 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
         active_samples += region.active_samples;
     }
     record.active_samples = active_samples;
+    record.area_occ = static_cast<double>(active_samples) * region_settings.sample_spacing * region_settings.sample_spacing;
+    record.area_band = result.active_area;
+    record.area_sheet = ComputeCollapsedSheetArea(result, region_settings.sample_spacing);
+    record.active_area = record.area_band;
 
     return record;
 }
@@ -298,6 +355,9 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
 
     record.pressure_center_x = pressure_weight_sum > 0 ? weighted_center_x / pressure_weight_sum : 0.0;
     record.active_regions = record.active_area > 0 ? 1 : 0;
+    record.area_occ = record.active_area;
+    record.area_band = record.active_area;
+    record.area_sheet = record.active_area;
     record.eval_ms = std::chrono::duration<double, std::milli>(stop - start).count();
     return record;
 }
@@ -305,13 +365,14 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
 void WriteRecordsCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,max_penetration,pressure_center_x,eval_ms,active_regions,active_samples\n";
+    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,eval_ms,active_regions,active_samples\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
             << record.tilt_z_deg << ',' << record.offset_x << ',' << (record.valid ? 1 : 0) << ',' << record.force_x
             << ',' << record.force_y << ',' << record.force_z << ',' << record.torque_x << ',' << record.torque_y << ','
-            << record.torque_z << ',' << record.active_area << ',' << record.max_penetration << ','
+            << record.torque_z << ',' << record.active_area << ',' << record.area_occ << ',' << record.area_band << ','
+            << record.area_sheet << ',' << record.max_penetration << ','
             << record.pressure_center_x << ',' << record.eval_ms << ',' << record.active_regions << ','
             << record.active_samples << '\n';
     }
@@ -348,11 +409,17 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
         const double force_error = record.force_y - reference.force_y;
         const double torque_error = record.torque_z - reference.torque_z;
         const double area_error = record.active_area - reference.active_area;
+        const double area_occ_error = record.area_occ - reference.active_area;
+        const double area_band_error = record.area_band - reference.active_area;
+        const double area_sheet_error = record.area_sheet - reference.active_area;
         const double center_error = record.pressure_center_x - reference.pressure_center_x;
 
         summary.force_y_rmse += force_error * force_error;
         summary.torque_z_rmse += torque_error * torque_error;
         summary.active_area_rmse += area_error * area_error;
+        summary.area_occ_rmse += area_occ_error * area_occ_error;
+        summary.area_band_rmse += area_band_error * area_band_error;
+        summary.area_sheet_rmse += area_sheet_error * area_sheet_error;
         summary.pressure_center_x_rmse += center_error * center_error;
         summary.force_y_max_abs = std::max(summary.force_y_max_abs, std::abs(force_error));
         summary.torque_z_max_abs = std::max(summary.torque_z_max_abs, std::abs(torque_error));
@@ -371,6 +438,9 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
         summary.force_y_rmse = std::sqrt(summary.force_y_rmse * inv_count);
         summary.torque_z_rmse = std::sqrt(summary.torque_z_rmse * inv_count);
         summary.active_area_rmse = std::sqrt(summary.active_area_rmse * inv_count);
+        summary.area_occ_rmse = std::sqrt(summary.area_occ_rmse * inv_count);
+        summary.area_band_rmse = std::sqrt(summary.area_band_rmse * inv_count);
+        summary.area_sheet_rmse = std::sqrt(summary.area_sheet_rmse * inv_count);
         summary.pressure_center_x_rmse = std::sqrt(summary.pressure_center_x_rmse * inv_count);
         result.push_back(summary);
     }
@@ -388,13 +458,36 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
 void WriteSummaryCsv(const fs::path& path, const std::vector<BenchmarkSummary>& summaries) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_count,mean_eval_ms,contact_ratio,force_y_rmse,force_y_max_abs,torque_z_rmse,torque_z_max_abs,active_area_rmse,pressure_center_x_rmse\n";
+    out << "scenario,method,sample_count,mean_eval_ms,contact_ratio,force_y_rmse,force_y_max_abs,torque_z_rmse,torque_z_max_abs,active_area_rmse,area_occ_rmse,area_band_rmse,area_sheet_rmse,pressure_center_x_rmse\n";
 
     for (const auto& summary : summaries) {
         out << summary.scenario << ',' << summary.method << ',' << summary.sample_count << ',' << summary.mean_eval_ms << ','
             << summary.contact_ratio << ',' << summary.force_y_rmse << ',' << summary.force_y_max_abs << ','
             << summary.torque_z_rmse << ',' << summary.torque_z_max_abs << ',' << summary.active_area_rmse << ','
+            << summary.area_occ_rmse << ',' << summary.area_band_rmse << ',' << summary.area_sheet_rmse << ','
             << summary.pressure_center_x_rmse << '\n';
+    }
+}
+
+void WriteCenteredAreaModesCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
+    std::ofstream out(path);
+    out << std::setprecision(16);
+    out << "sample_index,penetration,area_occ,area_band,area_sheet,active_samples\n";
+
+    std::vector<BenchmarkRecord> centered_records;
+    centered_records.reserve(records.size());
+    for (const auto& record : records) {
+        if (record.scenario == "centered_compression" && record.method == "distributed_sdf") {
+            centered_records.push_back(record);
+        }
+    }
+
+    std::stable_sort(centered_records.begin(), centered_records.end(),
+                     [](const BenchmarkRecord& a, const BenchmarkRecord& b) { return a.sample_index < b.sample_index; });
+
+    for (const auto& record : centered_records) {
+        out << record.sample_index << ',' << record.penetration << ',' << record.area_occ << ',' << record.area_band
+            << ',' << record.area_sheet << ',' << record.active_samples << '\n';
     }
 }
 
@@ -403,6 +496,7 @@ void PrintSummary(const std::vector<BenchmarkSummary>& summaries) {
     for (const auto& summary : summaries) {
         std::cout << "  [" << summary.scenario << "] " << summary.method << "  Fy_rmse=" << summary.force_y_rmse
                   << "  Tz_rmse=" << summary.torque_z_rmse << "  area_rmse=" << summary.active_area_rmse
+                  << "  occ_rmse=" << summary.area_occ_rmse << "  sheet_rmse=" << summary.area_sheet_rmse
                   << "  center_x_rmse=" << summary.pressure_center_x_rmse << "  mean_ms=" << summary.mean_eval_ms
                   << "\n";
     }
@@ -533,12 +627,15 @@ int main(int argc, char* argv[]) {
 
     const fs::path records_path = output_dir / "benchmark_records.csv";
     const fs::path summary_path = output_dir / "benchmark_summary.csv";
+    const fs::path centered_area_path = output_dir / "centered_area_modes.csv";
     WriteRecordsCsv(records_path, records);
     WriteSummaryCsv(summary_path, summaries);
+    WriteCenteredAreaModesCsv(centered_area_path, records);
 
     std::cout << "Wrote:\n"
               << "  " << records_path.string() << "\n"
-              << "  " << summary_path.string() << "\n";
+              << "  " << summary_path.string() << "\n"
+              << "  " << centered_area_path.string() << "\n";
     PrintSummary(summaries);
 
     return 0;
