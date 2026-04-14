@@ -540,6 +540,19 @@ void UpdateBBoxFromFootprint(const ChSDFSheetLocalFootprint& footprint, ChAABB& 
     }
 }
 
+void AppendFootprintWorldVertices(const ChSDFSheetLocalFootprint& footprint, std::vector<ChVector3d>& points) {
+    if (!footprint.HasPolygon()) {
+        return;
+    }
+
+    points.reserve(points.size() + footprint.polygon_uv.size());
+    for (const auto& vertex_uv : footprint.polygon_uv) {
+        const ChVector3d vertex_world = footprint.origin_world + footprint.tangent_u_world * vertex_uv.x() +
+                                        footprint.tangent_v_world * vertex_uv.y();
+        points.push_back(vertex_world);
+    }
+}
+
 double ResolvePatchRecoveryRadius(double patch_measure_area, std::size_t support_seed_count, double sheet_scale) {
     double radius = sheet_scale > 0 ? sheet_scale : 0.0;
     if (support_seed_count > 0 && patch_measure_area > 0) {
@@ -549,6 +562,41 @@ double ResolvePatchRecoveryRadius(double patch_measure_area, std::size_t support
         radius = std::max(0.5 * sheet_scale, std::min(radius, 1.5 * sheet_scale));
     }
     return std::max(radius, 0.0);
+}
+
+double EstimateAxisHalfStep(std::vector<double> coords, double fallback) {
+    if (coords.size() < 2) {
+        return std::max(fallback, 0.0);
+    }
+
+    std::sort(coords.begin(), coords.end());
+    std::vector<double> unique_coords;
+    unique_coords.reserve(coords.size());
+    for (const double value : coords) {
+        if (unique_coords.empty() || std::abs(value - unique_coords.back()) > 1.0e-8) {
+            unique_coords.push_back(value);
+        }
+    }
+
+    if (unique_coords.size() < 2) {
+        return std::max(fallback, 0.0);
+    }
+
+    std::vector<double> diffs;
+    diffs.reserve(unique_coords.size() - 1);
+    for (std::size_t i = 1; i < unique_coords.size(); ++i) {
+        const double diff = unique_coords[i] - unique_coords[i - 1];
+        if (diff > 1.0e-8) {
+            diffs.push_back(diff);
+        }
+    }
+
+    if (diffs.empty()) {
+        return std::max(fallback, 0.0);
+    }
+
+    std::sort(diffs.begin(), diffs.end());
+    return 0.5 * diffs[diffs.size() / 2];
 }
 
 void ExpandProjectedSupportBBox(ChAABB& bbox,
@@ -636,8 +684,10 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
     double pressure_weight_sum = 0;
     std::vector<ChVector3d> support_points;
     std::vector<ChVector3d> occupancy_points;
+    std::vector<ChVector3d> column_centers;
     support_points.reserve(patch.sample_indices.size() * 8);
     occupancy_points.reserve(patch.sample_indices.size() * 8);
+    column_centers.reserve(patch.sample_indices.size());
 
     for (const auto sample_index : patch.sample_indices) {
         const auto& sample = samples[sample_index];
@@ -648,8 +698,11 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
         normal_sum += sample.normal_world * sample.measure_area;
         patch.bounds_world += sample.source_bounds_world;
         patch.support_bbox_world += sample.support_bbox_world;
+        column_centers.push_back(sample.centroid_world);
 
-        if (!sample.support_bbox_world.IsInverted()) {
+        if (sample.support_footprint.HasPolygon()) {
+            AppendFootprintWorldVertices(sample.support_footprint, support_points);
+        } else if (!sample.support_bbox_world.IsInverted()) {
             const auto corners = BuildAABBCorners(sample.support_bbox_world);
             support_points.insert(support_points.end(), corners.begin(), corners.end());
         }
@@ -679,6 +732,9 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
         ComputeProjectedHullMetrics(occupancy_points, patch.centroid_world, patch.mean_normal_world);
     const double base_recovery_radius =
         ResolvePatchRecoveryRadius(patch.measure_area, patch.support_seed_count, sheet_scale);
+    ChVector3d column_tangent_u;
+    ChVector3d column_tangent_v;
+    BuildOrthonormalBasis(patch.mean_normal_world, column_tangent_u, column_tangent_v);
 
     double recovered_area = patch.measure_area;
     double recovery_radius_u = base_recovery_radius;
@@ -728,30 +784,96 @@ void FinalizeV2Patch(ChSDFSheetPatch& patch,
             recovery_radius_v = major_scale * base_recovery_radius;
         }
 
+        if (occupancy_metrics.valid) {
+            min_u = std::max(min_u, occupancy_metrics.min_u - recovery_radius_u);
+            max_u = std::min(max_u, occupancy_metrics.max_u + recovery_radius_u);
+            min_v = std::max(min_v, occupancy_metrics.min_v - recovery_radius_v);
+            max_v = std::min(max_v, occupancy_metrics.max_v + recovery_radius_v);
+
+            if (max_u < min_u) {
+                const double mid_u = 0.5 * (min_u + max_u);
+                min_u = mid_u;
+                max_u = mid_u;
+            }
+            if (max_v < min_v) {
+                const double mid_v = 0.5 * (min_v + max_v);
+                min_v = mid_v;
+                max_v = mid_v;
+            }
+        }
+
+        if (!column_centers.empty()) {
+            std::vector<double> column_u;
+            std::vector<double> column_v;
+            column_u.reserve(column_centers.size());
+            column_v.reserve(column_centers.size());
+
+            double column_min_u = std::numeric_limits<double>::infinity();
+            double column_max_u = -std::numeric_limits<double>::infinity();
+            double column_min_v = std::numeric_limits<double>::infinity();
+            double column_max_v = -std::numeric_limits<double>::infinity();
+
+            for (const auto& center_world : column_centers) {
+                const ChVector3d rel = center_world - patch.centroid_world;
+                const double u = Vdot(rel, column_tangent_u);
+                const double v = Vdot(rel, column_tangent_v);
+                column_u.push_back(u);
+                column_v.push_back(v);
+                column_min_u = std::min(column_min_u, u);
+                column_max_u = std::max(column_max_u, u);
+                column_min_v = std::min(column_min_v, v);
+                column_max_v = std::max(column_max_v, v);
+            }
+
+            const double half_step_u = EstimateAxisHalfStep(column_u, recovery_radius_u);
+            const double half_step_v = EstimateAxisHalfStep(column_v, recovery_radius_v);
+            const double centroid_min_u = column_min_u - half_step_u;
+            const double centroid_max_u = column_max_u + half_step_u;
+            const double centroid_min_v = column_min_v - half_step_v;
+            const double centroid_max_v = column_max_v + half_step_v;
+
+            min_u = std::max(min_u, centroid_min_u);
+            max_u = std::min(max_u, centroid_max_u);
+            min_v = std::max(min_v, centroid_min_v);
+            max_v = std::min(max_v, centroid_max_v);
+
+            if (max_u < min_u) {
+                min_u = centroid_min_u;
+                max_u = centroid_max_u;
+            }
+            if (max_v < min_v) {
+                min_v = centroid_min_v;
+                max_v = centroid_max_v;
+            }
+        }
+
         const double core_area = support_metrics.valid ? support_metrics.area : occupancy_metrics.area;
         recovered_area = core_area + 2.0 * recovery_radius_u * span_v + 2.0 * recovery_radius_v * span_u +
                          CH_PI * recovery_radius_u * recovery_radius_v;
     } else if (base_recovery_radius > 0) {
         recovered_area = CH_PI * base_recovery_radius * base_recovery_radius;
     }
-    patch.footprint_area = std::max(recovered_area, patch.measure_area);
-
-    patch.support_footprint.origin_world = patch.centroid_world;
-    BuildOrthonormalBasis(patch.mean_normal_world, patch.support_footprint.tangent_u_world,
-                          patch.support_footprint.tangent_v_world);
-    patch.support_footprint.polygon_uv = {ChVector2d(min_u - recovery_radius_u, min_v - recovery_radius_v),
-                                          ChVector2d(max_u + recovery_radius_u, min_v - recovery_radius_v),
-                                          ChVector2d(max_u + recovery_radius_u, max_v + recovery_radius_v),
-                                          ChVector2d(min_u - recovery_radius_u, max_v + recovery_radius_v)};
-    patch.support_footprint.area = PolygonArea(patch.support_footprint.polygon_uv);
-    patch.support_footprint.centroid_uv = PolygonCentroid(patch.support_footprint.polygon_uv);
-    if (!patch.support_footprint.HasPolygon()) {
-        patch.support_footprint = MakeSquareFootprint(patch.centroid_world, patch.mean_normal_world, patch.footprint_area);
+    if (support_metrics.valid || occupancy_metrics.valid) {
+        patch.support_footprint.origin_world = patch.centroid_world;
+        BuildOrthonormalBasis(patch.mean_normal_world, patch.support_footprint.tangent_u_world,
+                              patch.support_footprint.tangent_v_world);
+        patch.support_footprint.polygon_uv = {ChVector2d(min_u - recovery_radius_u, min_v - recovery_radius_v),
+                                              ChVector2d(max_u + recovery_radius_u, min_v - recovery_radius_v),
+                                              ChVector2d(max_u + recovery_radius_u, max_v + recovery_radius_v),
+                                              ChVector2d(min_u - recovery_radius_u, max_v + recovery_radius_v)};
+        patch.support_footprint.area = PolygonArea(patch.support_footprint.polygon_uv);
+        patch.support_footprint.centroid_uv = PolygonCentroid(patch.support_footprint.polygon_uv);
     }
+    if (!patch.support_footprint.HasPolygon()) {
+        const double fallback_area = recovered_area > 1.0e-16 ? recovered_area : patch.measure_area;
+        patch.support_footprint = MakeSquareFootprint(patch.centroid_world, patch.mean_normal_world, fallback_area);
+    }
+    patch.footprint_area =
+        patch.support_footprint.area > 1.0e-16 ? patch.support_footprint.area : std::max(recovered_area, 0.0);
     UpdateBBoxFromFootprint(patch.support_footprint, patch.support_bbox_world);
     if (patch.support_bbox_world.IsInverted()) {
         ExpandProjectedSupportBBox(patch.support_bbox_world, patch.centroid_world, patch.mean_normal_world, support_points,
-                                   std::max(patch.footprint_area, patch.measure_area));
+                                   std::max(patch.footprint_area, std::max(recovered_area, 0.0)));
     }
 }
 
@@ -1101,7 +1223,6 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
     }
 
     sample.measure_area = measure_area;
-    sample.footprint_area = measure_area;
     sample.centroid_world = centroid_sum / measure_area;
     sample.pressure_center_world =
         pressure_weight_sum > 0 ? pressure_center_sum / pressure_weight_sum : sample.centroid_world;
@@ -1162,6 +1283,8 @@ ChSDFSheetFiberSample CollapseFiberCluster(const std::vector<ChSDFSheetSeed>& se
                                            ChVector2d(half_u, half_v), ChVector2d(-half_u, half_v)};
     sample.support_footprint.area = PolygonArea(sample.support_footprint.polygon_uv);
     sample.support_footprint.centroid_uv = PolygonCentroid(sample.support_footprint.polygon_uv);
+    sample.footprint_area =
+        sample.support_footprint.area > 1.0e-16 ? sample.support_footprint.area : sample.measure_area;
     UpdateBBoxFromFootprint(sample.support_footprint, sample.support_bbox_world);
     for (const auto& point : seed_points) {
         sample.support_bbox_world += point;

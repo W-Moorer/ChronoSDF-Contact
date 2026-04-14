@@ -191,6 +191,32 @@ struct CurvedSheetSummary {
     double fallback_ratio = 0;
 };
 
+struct PatchAreaDiagnosticRecord {
+    std::string scenario;
+    std::string method;
+    std::size_t sample_index = 0;
+    double penetration = 0;
+    double tilt_z_deg = 0;
+    double offset_x = 0;
+    std::size_t region_id = 0;
+    std::size_t patch_id = 0;
+    std::size_t support_columns = 0;
+    std::size_t support_seed_count = 0;
+    std::size_t polygon_vertex_count = 0;
+    double measure_area = 0;
+    double footprint_area = 0;
+    double footprint_polygon_area = 0;
+    double support_bbox_projected_area = 0;
+    double polygon_to_footprint_ratio = 0;
+    double bbox_to_footprint_ratio = 0;
+    double bbox_to_polygon_ratio = 0;
+};
+
+struct DistributedEvaluation {
+    BenchmarkRecord record;
+    std::vector<PatchAreaDiagnosticRecord> patch_area_records;
+};
+
 double GridStep(std::size_t count, double half_length) {
     return (count > 1) ? (2.0 * half_length / static_cast<double>(count - 1)) : (2.0 * half_length);
 }
@@ -205,6 +231,18 @@ double TrapezoidWeight(std::size_t index, std::size_t count) {
 
 double Degrees(double radians) {
     return radians / kDegToRad;
+}
+
+ChVector3d SafeNormalized(const ChVector3d& v, const ChVector3d& fallback = VECT_Y) {
+    const double length = v.Length();
+    return length > 1.0e-12 ? v / length : fallback;
+}
+
+void BuildOrthonormalBasis(const ChVector3d& normal, ChVector3d& tangent_u, ChVector3d& tangent_v) {
+    const ChVector3d n = SafeNormalized(normal, VECT_Y);
+    const ChVector3d reference = (std::abs(n.y()) < 0.9) ? VECT_Y : VECT_X;
+    tangent_u = SafeNormalized(Vcross(reference, n), VECT_X);
+    tangent_v = SafeNormalized(Vcross(n, tangent_u), VECT_Z);
 }
 
 std::string KeyFor(const std::string& scenario, std::size_t sample_index) {
@@ -286,6 +324,54 @@ double ComputePressureCenterX(const ChSDFShapePairContactResult& result) {
     return weight_sum > 0 ? weighted_x / weight_sum : 0.0;
 }
 
+double ProjectedSupportBBoxArea(const ChSDFSheetPatch& patch) {
+    if (patch.support_bbox_world.IsInverted()) {
+        return 0.0;
+    }
+
+    ChVector3d tangent_u = patch.support_footprint.tangent_u_world;
+    ChVector3d tangent_v = patch.support_footprint.tangent_v_world;
+    if (tangent_u.Length2() <= 1.0e-24 || tangent_v.Length2() <= 1.0e-24) {
+        BuildOrthonormalBasis(patch.mean_normal_world, tangent_u, tangent_v);
+    }
+
+    const ChVector3d origin_world =
+        (patch.support_footprint.origin_world.Length2() > 0 || patch.centroid_world.Length2() == 0)
+            ? patch.support_footprint.origin_world
+            : patch.centroid_world;
+
+    const std::array<ChVector3d, 8> corners = {
+        ChVector3d(patch.support_bbox_world.min.x(), patch.support_bbox_world.min.y(), patch.support_bbox_world.min.z()),
+        ChVector3d(patch.support_bbox_world.min.x(), patch.support_bbox_world.min.y(), patch.support_bbox_world.max.z()),
+        ChVector3d(patch.support_bbox_world.min.x(), patch.support_bbox_world.max.y(), patch.support_bbox_world.min.z()),
+        ChVector3d(patch.support_bbox_world.min.x(), patch.support_bbox_world.max.y(), patch.support_bbox_world.max.z()),
+        ChVector3d(patch.support_bbox_world.max.x(), patch.support_bbox_world.min.y(), patch.support_bbox_world.min.z()),
+        ChVector3d(patch.support_bbox_world.max.x(), patch.support_bbox_world.min.y(), patch.support_bbox_world.max.z()),
+        ChVector3d(patch.support_bbox_world.max.x(), patch.support_bbox_world.max.y(), patch.support_bbox_world.min.z()),
+        ChVector3d(patch.support_bbox_world.max.x(), patch.support_bbox_world.max.y(), patch.support_bbox_world.max.z())};
+
+    double min_u = std::numeric_limits<double>::infinity();
+    double max_u = -std::numeric_limits<double>::infinity();
+    double min_v = std::numeric_limits<double>::infinity();
+    double max_v = -std::numeric_limits<double>::infinity();
+
+    for (const auto& corner : corners) {
+        const ChVector3d rel = corner - origin_world;
+        const double u = Vdot(rel, tangent_u);
+        const double v = Vdot(rel, tangent_v);
+        min_u = std::min(min_u, u);
+        max_u = std::max(max_u, u);
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    }
+
+    if (!std::isfinite(min_u) || !std::isfinite(max_u) || !std::isfinite(min_v) || !std::isfinite(max_v)) {
+        return 0.0;
+    }
+
+    return std::max(max_u - min_u, 0.0) * std::max(max_v - min_v, 0.0);
+}
+
 CurvedSheetReference MakeCylinderSheetReference(double penetration) {
     constexpr double radius = 0.5;
     constexpr double length = 1.0;
@@ -302,13 +388,13 @@ CurvedSheetReference MakeCylinderSheetReference(double penetration) {
     return ref;
 }
 
-BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
-                                    const PoseSample& pose,
-                                    ChBody* moving_body,
-                                    ChSDFShapePair& pair,
-                                    const ChSDFBrickPairBroadphase::Settings& pair_settings,
-                                    const ChSDFContactRegionBuilder::Settings& region_settings,
-                                    const ChSDFNormalPressureSettings& pressure_settings) {
+DistributedEvaluation EvaluateDistributed(const std::string& scenario_name,
+                                          const PoseSample& pose,
+                                          ChBody* moving_body,
+                                          ChSDFShapePair& pair,
+                                          const ChSDFBrickPairBroadphase::Settings& pair_settings,
+                                          const ChSDFContactRegionBuilder::Settings& region_settings,
+                                          const ChSDFNormalPressureSettings& pressure_settings) {
     moving_body->SetPos(ChVector3d(pose.offset_x, 1.0 - pose.penetration, 0.0));
     moving_body->SetRot(QuatFromAngleZ(pose.tilt_z_rad));
     moving_body->SetPosDt(VNULL);
@@ -318,7 +404,8 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
     const auto result = pair.EvaluateContact(pair_settings, region_settings, pressure_settings);
     const auto stop = std::chrono::steady_clock::now();
 
-    BenchmarkRecord record;
+    DistributedEvaluation evaluation;
+    auto& record = evaluation.record;
     record.scenario = scenario_name;
     record.method = "distributed_sdf";
     record.sample_index = pose.sample_index;
@@ -376,7 +463,41 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
         record.area_corrected = result.patch_consistency_result->total_corrected_area;
     }
 
-    return record;
+    if (result.sheet_result) {
+        for (const auto& region : result.sheet_result->regions) {
+            for (const auto& patch : region.patches) {
+                PatchAreaDiagnosticRecord patch_record;
+                patch_record.scenario = scenario_name;
+                patch_record.method = "distributed_sdf";
+                patch_record.sample_index = pose.sample_index;
+                patch_record.penetration = pose.penetration;
+                patch_record.tilt_z_deg = Degrees(pose.tilt_z_rad);
+                patch_record.offset_x = pose.offset_x;
+                patch_record.region_id = region.region_id;
+                patch_record.patch_id = patch.patch_id;
+                patch_record.support_columns = patch.support_columns;
+                patch_record.support_seed_count = patch.support_seed_count;
+                patch_record.polygon_vertex_count = patch.support_footprint.polygon_uv.size();
+                patch_record.measure_area = patch.measure_area;
+                patch_record.footprint_area = patch.footprint_area;
+                patch_record.footprint_polygon_area = patch.support_footprint.area;
+                patch_record.support_bbox_projected_area = ProjectedSupportBBoxArea(patch);
+                if (patch_record.footprint_area > 1.0e-16) {
+                    patch_record.polygon_to_footprint_ratio =
+                        patch_record.footprint_polygon_area / patch_record.footprint_area;
+                    patch_record.bbox_to_footprint_ratio =
+                        patch_record.support_bbox_projected_area / patch_record.footprint_area;
+                }
+                if (patch_record.footprint_polygon_area > 1.0e-16) {
+                    patch_record.bbox_to_polygon_ratio =
+                        patch_record.support_bbox_projected_area / patch_record.footprint_polygon_area;
+                }
+                evaluation.patch_area_records.push_back(std::move(patch_record));
+            }
+        }
+    }
+
+    return evaluation;
 }
 
 std::vector<CurvedSheetRecord> EvaluateCurvedSheetModes(const std::string& scenario_name,
@@ -798,6 +919,23 @@ void WriteCurvedSheetSummaryCsv(const fs::path& path, const std::vector<CurvedSh
     }
 }
 
+void WritePatchAreaDiagnosticsCsv(const fs::path& path, const std::vector<PatchAreaDiagnosticRecord>& records) {
+    std::ofstream out(path);
+    out << std::setprecision(16);
+    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,region_id,patch_id,support_columns,"
+           "support_seed_count,polygon_vertex_count,measure_area,footprint_area,footprint_polygon_area,"
+           "support_bbox_projected_area,polygon_to_footprint_ratio,bbox_to_footprint_ratio,bbox_to_polygon_ratio\n";
+
+    for (const auto& record : records) {
+        out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
+            << record.tilt_z_deg << ',' << record.offset_x << ',' << record.region_id << ',' << record.patch_id << ','
+            << record.support_columns << ',' << record.support_seed_count << ',' << record.polygon_vertex_count << ','
+            << record.measure_area << ',' << record.footprint_area << ',' << record.footprint_polygon_area << ','
+            << record.support_bbox_projected_area << ',' << record.polygon_to_footprint_ratio << ','
+            << record.bbox_to_footprint_ratio << ',' << record.bbox_to_polygon_ratio << '\n';
+    }
+}
+
 void PrintCurvedSheetSummary(const std::vector<CurvedSheetSummary>& summaries) {
     std::cout << "\nCurved sheet benchmark against analytic cylinder-plane footprint\n";
     for (const auto& summary : summaries) {
@@ -942,6 +1080,8 @@ int main(int argc, char* argv[]) {
 
     std::vector<BenchmarkRecord> records;
     records.reserve(64);
+    std::vector<PatchAreaDiagnosticRecord> patch_area_records;
+    patch_area_records.reserve(256);
     std::vector<CurvedSheetRecord> curved_sheet_records;
     curved_sheet_records.reserve(32);
 
@@ -949,8 +1089,12 @@ int main(int argc, char* argv[]) {
         for (const auto& pose : scenario.poses) {
             for (const auto& method : methods) {
                 if (method.is_distributed) {
-                    records.push_back(EvaluateDistributed(scenario.name, pose, moving_body.get(), pair, pair_settings,
-                                                          region_settings, pressure_settings));
+                    auto evaluation =
+                        EvaluateDistributed(scenario.name, pose, moving_body.get(), pair, pair_settings, region_settings,
+                                            pressure_settings);
+                    records.push_back(std::move(evaluation.record));
+                    patch_area_records.insert(patch_area_records.end(), evaluation.patch_area_records.begin(),
+                                              evaluation.patch_area_records.end());
                 } else {
                     records.push_back(
                         EvaluatePlanePenalty(scenario.name, method.name, pose, method.samples_u, method.samples_v,
@@ -983,11 +1127,13 @@ int main(int argc, char* argv[]) {
     const fs::path records_path = output_dir / "benchmark_records.csv";
     const fs::path summary_path = output_dir / "benchmark_summary.csv";
     const fs::path centered_area_path = output_dir / "centered_area_modes.csv";
+    const fs::path patch_area_diagnostics_path = output_dir / "patch_area_diagnostics.csv";
     const fs::path curved_sheet_records_path = output_dir / "curved_sheet_records.csv";
     const fs::path curved_sheet_summary_path = output_dir / "curved_sheet_summary.csv";
     WriteRecordsCsv(records_path, records);
     WriteSummaryCsv(summary_path, summaries);
     WriteCenteredAreaModesCsv(centered_area_path, records);
+    WritePatchAreaDiagnosticsCsv(patch_area_diagnostics_path, patch_area_records);
     WriteCurvedSheetRecordsCsv(curved_sheet_records_path, curved_sheet_records);
     WriteCurvedSheetSummaryCsv(curved_sheet_summary_path, curved_sheet_summaries);
 
@@ -995,6 +1141,7 @@ int main(int argc, char* argv[]) {
               << "  " << records_path.string() << "\n"
               << "  " << summary_path.string() << "\n"
               << "  " << centered_area_path.string() << "\n"
+              << "  " << patch_area_diagnostics_path.string() << "\n"
               << "  " << curved_sheet_records_path.string() << "\n"
               << "  " << curved_sheet_summary_path.string() << "\n";
     PrintSummary(summaries);
