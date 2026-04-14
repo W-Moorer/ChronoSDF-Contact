@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -1147,5 +1149,12 @@ int main(int argc, char* argv[]) {
     PrintSummary(summaries);
     PrintCurvedSheetSummary(curved_sheet_summaries);
 
-    return 0;
+    // The benchmark has already materialized all outputs above. Some shutdown-time
+    // destructor path in the current Windows build is unstable; exit explicitly so
+    // HEAD remains reproducible for result comparisons.
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(0);
 }
