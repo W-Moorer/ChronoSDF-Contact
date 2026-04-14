@@ -29,6 +29,7 @@ namespace chrono {
 
 class ChBody;
 struct ChSDFSheetShapePairResult;
+struct ChSDFPatchConsistencyPairResult;
 
 /// @addtogroup chrono_collision
 /// @{
@@ -229,6 +230,18 @@ struct ChApi ChSDFShapePairContactResult {
     ChFrameMoving<> shape_a_frame_abs;
     ChFrameMoving<> shape_b_frame_abs;
 
+    /// Current band-mechanics wrench reduced to the corresponding shape origins.
+    ChWrenchd wrench_shape_a_band = {VNULL, VNULL};
+    ChWrenchd wrench_shape_b_band = {VNULL, VNULL};
+    ChWrenchd wrench_world_a_band = {VNULL, VNULL};
+    ChWrenchd wrench_world_b_band = {VNULL, VNULL};
+
+    /// Patch-bridge corrected wrench reduced to the corresponding shape origins.
+    ChWrenchd wrench_shape_a_corrected = {VNULL, VNULL};
+    ChWrenchd wrench_shape_b_corrected = {VNULL, VNULL};
+    ChWrenchd wrench_world_a_corrected = {VNULL, VNULL};
+    ChWrenchd wrench_world_b_corrected = {VNULL, VNULL};
+
     ChWrenchd wrench_shape_a = {VNULL, VNULL};
     ChWrenchd wrench_shape_b = {VNULL, VNULL};
     ChWrenchd wrench_world_a = {VNULL, VNULL};
@@ -241,11 +254,14 @@ struct ChApi ChSDFShapePairContactResult {
     double band_area = 0;
     double sheet_area = 0;
     double sheet_footprint_area = 0;
+    double corrected_active_area = 0;
     double active_area = 0;
     double largest_sheet_patch_area = 0;
     double sheet_area_ratio = 0;
     double sheet_mean_support_seed_count = 0;
     double sheet_normal_spread = 0;
+    double corrected_mean_alpha = 1;
+    double corrected_integrated_pressure = 0;
     double integrated_pressure = 0;
     double mean_pressure = 0;
     double mean_local_stiffness = 0;
@@ -266,6 +282,7 @@ struct ChApi ChSDFShapePairContactResult {
     bool sheet_used_fallback = false;
 
     std::shared_ptr<ChSDFSheetShapePairResult> sheet_result;
+    std::shared_ptr<ChSDFPatchConsistencyPairResult> patch_consistency_result;
 
     std::vector<ChSDFBrickPairWrenchResult> regions;
 

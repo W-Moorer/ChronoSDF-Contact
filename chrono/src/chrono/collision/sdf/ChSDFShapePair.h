@@ -21,6 +21,7 @@
 #include "chrono/collision/sdf/ChSDFContactSurface.h"
 #include "chrono/collision/sdf/ChSDFContactWrench.h"
 #include "chrono/collision/sdf/ChSDFContactRegion.h"
+#include "chrono/collision/sdf/ChSDFPatchConsistency.h"
 #include "chrono/collision/sdf/ChSDFSheetRepresentation.h"
 #include "chrono/physics/ChBody.h"
 
@@ -60,6 +61,9 @@ class ChApi ChSDFShapePair {
     void SetShapeBFrame(const ChFrame<>& frame) { m_shape_b_frame = frame; }
     void SetChartSettings(const ChSDFRegionChartSettings& settings) { m_chart_settings = settings; }
     void SetSheetCollapseSettings(const ChSDFSheetCollapseSettings& settings) { m_sheet_settings = settings; }
+    void SetPatchConsistencySettings(const ChSDFPatchConsistencySettings& settings) {
+        m_patch_consistency_settings = settings;
+    }
 
     ChBody* GetBodyA() const { return m_body_a; }
     ChBody* GetBodyB() const { return m_body_b; }
@@ -71,6 +75,7 @@ class ChApi ChSDFShapePair {
     const ChFrame<>& GetShapeBFrame() const { return m_shape_b_frame; }
     const ChSDFRegionChartSettings& GetChartSettings() const { return m_chart_settings; }
     const ChSDFSheetCollapseSettings& GetSheetCollapseSettings() const { return m_sheet_settings; }
+    const ChSDFPatchConsistencySettings& GetPatchConsistencySettings() const { return m_patch_consistency_settings; }
     StabilizationSettings& GetStabilizationSettings() { return m_stabilization_settings; }
     const StabilizationSettings& GetStabilizationSettings() const { return m_stabilization_settings; }
 
@@ -149,6 +154,7 @@ class ChApi ChSDFShapePair {
     void ApplyActivationHysteresis(ChSDFShapePairContactResult& result);
     void RebuildAggregateResult(ChSDFShapePairContactResult& result) const;
     void UpdateSheetResult(ChSDFShapePairContactResult& result) const;
+    void UpdatePatchConsistencyResult(ChSDFShapePairContactResult& result) const;
     void UpdateHistory(const ChSDFShapePairContactResult& result);
 
     ChBody* m_body_a = nullptr;
@@ -161,6 +167,7 @@ class ChApi ChSDFShapePair {
     ChFrame<> m_shape_b_frame;
     ChSDFRegionChartSettings m_chart_settings;
     ChSDFSheetCollapseSettings m_sheet_settings;
+    ChSDFPatchConsistencySettings m_patch_consistency_settings;
 
     StabilizationSettings m_stabilization_settings;
     std::vector<RegionHistoryState> m_region_history;

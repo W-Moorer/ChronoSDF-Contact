@@ -17,6 +17,7 @@
 
 #include "chrono/core/ChFrameMoving.h"
 #include "chrono/collision/sdf/ChSDFPFCEvaluator.h"
+#include "chrono/collision/sdf/ChSDFPatchConsistency.h"
 #include "chrono/collision/sdf/ChSDFSheetRepresentation.h"
 #include "chrono/collision/sdf/ChSDFVolumeContactEvaluator.h"
 
@@ -204,6 +205,7 @@ ChSDFShapePairContactResult ChSDFShapePair::EvaluateContact(
         ChSDFContactWrenchEvaluator::MakeEffectiveMassProperties(m_body_b), pressure_settings);
     ApplyActivationHysteresis(result);
     UpdateSheetResult(result);
+    UpdatePatchConsistencyResult(result);
     UpdateHistory(result);
     return result;
 }
@@ -374,6 +376,18 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     result.sheet_fallback_regions = 0;
     result.sheet_used_fallback = false;
     result.sheet_result.reset();
+    result.patch_consistency_result.reset();
+    result.wrench_shape_a_band = {VNULL, VNULL};
+    result.wrench_shape_b_band = {VNULL, VNULL};
+    result.wrench_world_a_band = {VNULL, VNULL};
+    result.wrench_world_b_band = {VNULL, VNULL};
+    result.wrench_shape_a_corrected = {VNULL, VNULL};
+    result.wrench_shape_b_corrected = {VNULL, VNULL};
+    result.wrench_world_a_corrected = {VNULL, VNULL};
+    result.wrench_world_b_corrected = {VNULL, VNULL};
+    result.corrected_active_area = 0;
+    result.corrected_mean_alpha = 1;
+    result.corrected_integrated_pressure = 0;
     result.wrench_shape_a = {VNULL, VNULL};
     result.wrench_shape_b = {VNULL, VNULL};
     result.wrench_world_a = {VNULL, VNULL};
@@ -414,6 +428,17 @@ void ChSDFShapePair::RebuildAggregateResult(ChSDFShapePairContactResult& result)
     }
 
     result.band_area = result.active_area;
+    result.wrench_shape_a_band = result.wrench_shape_a;
+    result.wrench_shape_b_band = result.wrench_shape_b;
+    result.wrench_world_a_band = result.wrench_world_a;
+    result.wrench_world_b_band = result.wrench_world_b;
+    result.wrench_shape_a_corrected = result.wrench_shape_a;
+    result.wrench_shape_b_corrected = result.wrench_shape_b;
+    result.wrench_world_a_corrected = result.wrench_world_a;
+    result.wrench_world_b_corrected = result.wrench_world_b;
+    result.corrected_active_area = result.active_area;
+    result.corrected_integrated_pressure = result.integrated_pressure;
+    result.corrected_mean_alpha = 1.0;
 }
 
 void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) const {
@@ -455,6 +480,41 @@ void ChSDFShapePair::UpdateSheetResult(ChSDFShapePairContactResult& result) cons
     result.sheet_fallback_regions = sheet->fallback_regions;
     result.sheet_used_fallback = sheet->used_fallback;
     result.sheet_result = std::move(sheet);
+}
+
+void ChSDFShapePair::UpdatePatchConsistencyResult(ChSDFShapePairContactResult& result) const {
+    result.patch_consistency_result.reset();
+    result.wrench_shape_a_corrected = result.wrench_shape_a_band;
+    result.wrench_shape_b_corrected = result.wrench_shape_b_band;
+    result.wrench_world_a_corrected = result.wrench_world_a_band;
+    result.wrench_world_b_corrected = result.wrench_world_b_band;
+    result.corrected_active_area = result.active_area;
+    result.corrected_integrated_pressure = result.integrated_pressure;
+    result.corrected_mean_alpha = 1.0;
+
+    if (!m_patch_consistency_settings.enable || !result.valid || !result.sheet_result) {
+        return;
+    }
+
+    auto consistency = std::make_shared<ChSDFPatchConsistencyPairResult>(
+        ChSDFPatchConsistencyBridge::BuildPairConsistencyResult(result, *result.sheet_result, m_patch_consistency_settings));
+
+    result.wrench_world_a_corrected = consistency->wrench_world_a_corrected;
+    result.wrench_world_b_corrected = consistency->wrench_world_b_corrected;
+    result.corrected_active_area = consistency->total_corrected_area;
+    result.corrected_integrated_pressure = consistency->integrated_pressure_corrected;
+    result.corrected_mean_alpha = consistency->mean_alpha;
+
+    result.wrench_shape_a_corrected.force =
+        result.shape_a_frame_abs.TransformDirectionParentToLocal(result.wrench_world_a_corrected.force);
+    result.wrench_shape_a_corrected.torque =
+        result.shape_a_frame_abs.TransformDirectionParentToLocal(result.wrench_world_a_corrected.torque);
+    result.wrench_shape_b_corrected.force =
+        result.shape_b_frame_abs.TransformDirectionParentToLocal(result.wrench_world_b_corrected.force);
+    result.wrench_shape_b_corrected.torque =
+        result.shape_b_frame_abs.TransformDirectionParentToLocal(result.wrench_world_b_corrected.torque);
+
+    result.patch_consistency_result = std::move(consistency);
 }
 
 void ChSDFShapePair::UpdateHistory(const ChSDFShapePairContactResult& result) {

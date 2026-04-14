@@ -82,14 +82,17 @@ struct BenchmarkRecord {
     double force_x = 0;
     double force_y = 0;
     double force_z = 0;
+    double force_y_corrected = 0;
     double torque_x = 0;
     double torque_y = 0;
     double torque_z = 0;
+    double torque_z_corrected = 0;
 
     double active_area = 0;
     double area_occ = 0;
     double area_band = 0;
     double area_sheet = 0;
+    double area_corrected = 0;
     double max_penetration = 0;
     double pressure_center_x = 0;
     double sheet_center_x = 0;
@@ -97,6 +100,7 @@ struct BenchmarkRecord {
     double sheet_area_ratio = 0;
     double sheet_mean_support_seed_count = 0;
     double sheet_normal_spread = 0;
+    double mean_patch_alpha = 1;
     double sheet_support_bbox_xmin = 0;
     double sheet_support_bbox_xmax = 0;
     double sheet_support_bbox_zmin = 0;
@@ -118,13 +122,17 @@ struct BenchmarkSummary {
     double mean_eval_ms = 0;
     double contact_ratio = 0;
     double force_y_rmse = 0;
+    double force_y_corrected_rmse = 0;
     double force_y_max_abs = 0;
     double torque_z_rmse = 0;
+    double torque_z_corrected_rmse = 0;
     double torque_z_max_abs = 0;
     double active_area_rmse = 0;
     double area_occ_rmse = 0;
     double area_band_rmse = 0;
     double area_sheet_rmse = 0;
+    double area_corrected_rmse = 0;
+    double mean_patch_alpha = 0;
     double pressure_center_x_rmse = 0;
 };
 
@@ -320,9 +328,11 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
     record.force_x = result.wrench_world_b.force.x();
     record.force_y = result.wrench_world_b.force.y();
     record.force_z = result.wrench_world_b.force.z();
+    record.force_y_corrected = result.wrench_world_b_corrected.force.y();
     record.torque_x = result.wrench_world_b.torque.x();
     record.torque_y = result.wrench_world_b.torque.y();
     record.torque_z = result.wrench_world_b.torque.z();
+    record.torque_z_corrected = result.wrench_world_b_corrected.torque.z();
     record.active_area = result.active_area;
     record.max_penetration = result.max_penetration;
     record.pressure_center_x = ComputePressureCenterX(result);
@@ -337,6 +347,7 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
     record.area_occ = result.occupied_area;
     record.area_band = result.band_area;
     record.area_sheet = result.sheet_footprint_area;
+    record.area_corrected = result.corrected_active_area;
     record.active_area = record.area_band;
 
     if (result.sheet_result) {
@@ -358,6 +369,10 @@ BenchmarkRecord EvaluateDistributed(const std::string& scenario_name,
             record.sheet_support_bbox_zmin = result.sheet_result->support_bbox_world.min.z();
             record.sheet_support_bbox_zmax = result.sheet_result->support_bbox_world.max.z();
         }
+    }
+    if (result.patch_consistency_result) {
+        record.mean_patch_alpha = result.patch_consistency_result->mean_alpha;
+        record.area_corrected = result.patch_consistency_result->total_corrected_area;
     }
 
     return record;
@@ -490,12 +505,14 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
             const ChVector3d force_world(0, pressure * area, 0);
             const ChVector3d torque_world = Vcross(point_world - moving_frame.GetPos(), force_world);
 
-            record.force_x += force_world.x();
-            record.force_y += force_world.y();
-            record.force_z += force_world.z();
-            record.torque_x += torque_world.x();
-            record.torque_y += torque_world.y();
-            record.torque_z += torque_world.z();
+    record.force_x += force_world.x();
+    record.force_y += force_world.y();
+    record.force_z += force_world.z();
+    record.force_y_corrected += force_world.y();
+    record.torque_x += torque_world.x();
+    record.torque_y += torque_world.y();
+    record.torque_z += torque_world.z();
+    record.torque_z_corrected += torque_world.z();
             record.active_area += area;
             record.max_penetration = std::max(record.max_penetration, penetration);
             record.active_samples++;
@@ -512,6 +529,7 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
     record.area_occ = record.active_area;
     record.area_band = record.active_area;
     record.area_sheet = record.active_area;
+    record.area_corrected = record.active_area;
     record.eval_ms = std::chrono::duration<double, std::milli>(stop - start).count();
     return record;
 }
@@ -519,15 +537,17 @@ BenchmarkRecord EvaluatePlanePenalty(const std::string& scenario_name,
 void WriteRecordsCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_z,torque_x,torque_y,torque_z,active_area,area_occ,area_band,area_sheet,max_penetration,pressure_center_x,sheet_center_x,sheet_pressure_center_x,sheet_area_ratio,sheet_mean_support_seed_count,sheet_normal_spread,sheet_patch_count,sheet_fiber_count,sheet_fallback_regions,sheet_used_fallback,sheet_support_bbox_xmin,sheet_support_bbox_xmax,sheet_support_bbox_zmin,sheet_support_bbox_zmax,eval_ms,active_regions,active_samples\n";
+    out << "scenario,method,sample_index,penetration,tilt_z_deg,offset_x,valid,force_x,force_y,force_y_corrected,force_z,torque_x,torque_y,torque_z,torque_z_corrected,active_area,area_occ,area_band,area_sheet,area_corrected,max_penetration,pressure_center_x,sheet_center_x,sheet_pressure_center_x,sheet_area_ratio,mean_patch_alpha,sheet_mean_support_seed_count,sheet_normal_spread,sheet_patch_count,sheet_fiber_count,sheet_fallback_regions,sheet_used_fallback,sheet_support_bbox_xmin,sheet_support_bbox_xmax,sheet_support_bbox_zmin,sheet_support_bbox_zmax,eval_ms,active_regions,active_samples\n";
 
     for (const auto& record : records) {
         out << record.scenario << ',' << record.method << ',' << record.sample_index << ',' << record.penetration << ','
             << record.tilt_z_deg << ',' << record.offset_x << ',' << (record.valid ? 1 : 0) << ',' << record.force_x
-            << ',' << record.force_y << ',' << record.force_z << ',' << record.torque_x << ',' << record.torque_y << ','
-            << record.torque_z << ',' << record.active_area << ',' << record.area_occ << ',' << record.area_band << ','
-            << record.area_sheet << ',' << record.max_penetration << ',' << record.pressure_center_x << ','
-            << record.sheet_center_x << ',' << record.sheet_pressure_center_x << ',' << record.sheet_area_ratio << ','
+            << ',' << record.force_y << ',' << record.force_y_corrected << ',' << record.force_z << ','
+            << record.torque_x << ',' << record.torque_y << ',' << record.torque_z << ','
+            << record.torque_z_corrected << ',' << record.active_area << ',' << record.area_occ << ','
+            << record.area_band << ',' << record.area_sheet << ',' << record.area_corrected << ','
+            << record.max_penetration << ',' << record.pressure_center_x << ',' << record.sheet_center_x << ','
+            << record.sheet_pressure_center_x << ',' << record.sheet_area_ratio << ',' << record.mean_patch_alpha << ','
             << record.sheet_mean_support_seed_count << ',' << record.sheet_normal_spread << ','
             << record.sheet_patch_count << ',' << record.sheet_fiber_count << ',' << record.sheet_fallback_regions
             << ',' << (record.sheet_used_fallback ? 1 : 0) << ',' << record.sheet_support_bbox_xmin << ','
@@ -566,20 +586,27 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
         summary.contact_ratio += record.active_area > 0 ? 1.0 : 0.0;
 
         const double force_error = record.force_y - reference.force_y;
+        const double force_corrected_error = record.force_y_corrected - reference.force_y;
         const double torque_error = record.torque_z - reference.torque_z;
+        const double torque_corrected_error = record.torque_z_corrected - reference.torque_z;
         const double area_error = record.active_area - reference.active_area;
         const double area_occ_error = record.area_occ - reference.active_area;
         const double area_band_error = record.area_band - reference.active_area;
         const double area_sheet_error = record.area_sheet - reference.active_area;
+        const double area_corrected_error = record.area_corrected - reference.active_area;
         const double center_error = record.pressure_center_x - reference.pressure_center_x;
 
         summary.force_y_rmse += force_error * force_error;
+        summary.force_y_corrected_rmse += force_corrected_error * force_corrected_error;
         summary.torque_z_rmse += torque_error * torque_error;
+        summary.torque_z_corrected_rmse += torque_corrected_error * torque_corrected_error;
         summary.active_area_rmse += area_error * area_error;
         summary.area_occ_rmse += area_occ_error * area_occ_error;
         summary.area_band_rmse += area_band_error * area_band_error;
         summary.area_sheet_rmse += area_sheet_error * area_sheet_error;
+        summary.area_corrected_rmse += area_corrected_error * area_corrected_error;
         summary.pressure_center_x_rmse += center_error * center_error;
+        summary.mean_patch_alpha += record.mean_patch_alpha;
         summary.force_y_max_abs = std::max(summary.force_y_max_abs, std::abs(force_error));
         summary.torque_z_max_abs = std::max(summary.torque_z_max_abs, std::abs(torque_error));
     }
@@ -595,11 +622,15 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
         summary.mean_eval_ms *= inv_count;
         summary.contact_ratio *= inv_count;
         summary.force_y_rmse = std::sqrt(summary.force_y_rmse * inv_count);
+        summary.force_y_corrected_rmse = std::sqrt(summary.force_y_corrected_rmse * inv_count);
         summary.torque_z_rmse = std::sqrt(summary.torque_z_rmse * inv_count);
+        summary.torque_z_corrected_rmse = std::sqrt(summary.torque_z_corrected_rmse * inv_count);
         summary.active_area_rmse = std::sqrt(summary.active_area_rmse * inv_count);
         summary.area_occ_rmse = std::sqrt(summary.area_occ_rmse * inv_count);
         summary.area_band_rmse = std::sqrt(summary.area_band_rmse * inv_count);
         summary.area_sheet_rmse = std::sqrt(summary.area_sheet_rmse * inv_count);
+        summary.area_corrected_rmse = std::sqrt(summary.area_corrected_rmse * inv_count);
+        summary.mean_patch_alpha *= inv_count;
         summary.pressure_center_x_rmse = std::sqrt(summary.pressure_center_x_rmse * inv_count);
         result.push_back(summary);
     }
@@ -617,21 +648,22 @@ std::vector<BenchmarkSummary> BuildSummaries(const std::vector<BenchmarkRecord>&
 void WriteSummaryCsv(const fs::path& path, const std::vector<BenchmarkSummary>& summaries) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "scenario,method,sample_count,mean_eval_ms,contact_ratio,force_y_rmse,force_y_max_abs,torque_z_rmse,torque_z_max_abs,active_area_rmse,area_occ_rmse,area_band_rmse,area_sheet_rmse,pressure_center_x_rmse\n";
+    out << "scenario,method,sample_count,mean_eval_ms,contact_ratio,force_y_rmse,force_y_corrected_rmse,force_y_max_abs,torque_z_rmse,torque_z_corrected_rmse,torque_z_max_abs,active_area_rmse,area_occ_rmse,area_band_rmse,area_sheet_rmse,area_corrected_rmse,mean_patch_alpha,pressure_center_x_rmse\n";
 
     for (const auto& summary : summaries) {
         out << summary.scenario << ',' << summary.method << ',' << summary.sample_count << ',' << summary.mean_eval_ms << ','
-            << summary.contact_ratio << ',' << summary.force_y_rmse << ',' << summary.force_y_max_abs << ','
-            << summary.torque_z_rmse << ',' << summary.torque_z_max_abs << ',' << summary.active_area_rmse << ','
-            << summary.area_occ_rmse << ',' << summary.area_band_rmse << ',' << summary.area_sheet_rmse << ','
-            << summary.pressure_center_x_rmse << '\n';
+            << summary.contact_ratio << ',' << summary.force_y_rmse << ',' << summary.force_y_corrected_rmse << ','
+            << summary.force_y_max_abs << ',' << summary.torque_z_rmse << ',' << summary.torque_z_corrected_rmse
+            << ',' << summary.torque_z_max_abs << ',' << summary.active_area_rmse << ',' << summary.area_occ_rmse
+            << ',' << summary.area_band_rmse << ',' << summary.area_sheet_rmse << ',' << summary.area_corrected_rmse
+            << ',' << summary.mean_patch_alpha << ',' << summary.pressure_center_x_rmse << '\n';
     }
 }
 
 void WriteCenteredAreaModesCsv(const fs::path& path, const std::vector<BenchmarkRecord>& records) {
     std::ofstream out(path);
     out << std::setprecision(16);
-    out << "sample_index,penetration,area_occ,area_band,area_sheet,active_samples\n";
+    out << "sample_index,penetration,area_occ,area_band,area_sheet,area_corrected,active_samples\n";
 
     std::vector<BenchmarkRecord> centered_records;
     centered_records.reserve(records.size());
@@ -646,7 +678,7 @@ void WriteCenteredAreaModesCsv(const fs::path& path, const std::vector<Benchmark
 
     for (const auto& record : centered_records) {
         out << record.sample_index << ',' << record.penetration << ',' << record.area_occ << ',' << record.area_band
-            << ',' << record.area_sheet << ',' << record.active_samples << '\n';
+            << ',' << record.area_sheet << ',' << record.area_corrected << ',' << record.active_samples << '\n';
     }
 }
 
@@ -654,8 +686,10 @@ void PrintSummary(const std::vector<BenchmarkSummary>& summaries) {
     std::cout << "\nBenchmark summary against dense_reference_161x161\n";
     for (const auto& summary : summaries) {
         std::cout << "  [" << summary.scenario << "] " << summary.method << "  Fy_rmse=" << summary.force_y_rmse
-                  << "  Tz_rmse=" << summary.torque_z_rmse << "  area_rmse=" << summary.active_area_rmse
+                  << "  Fy_corr_rmse=" << summary.force_y_corrected_rmse << "  Tz_rmse=" << summary.torque_z_rmse
+                  << "  Tz_corr_rmse=" << summary.torque_z_corrected_rmse << "  area_rmse=" << summary.active_area_rmse
                   << "  occ_rmse=" << summary.area_occ_rmse << "  sheet_rmse=" << summary.area_sheet_rmse
+                  << "  corr_area_rmse=" << summary.area_corrected_rmse << "  alpha=" << summary.mean_patch_alpha
                   << "  center_x_rmse=" << summary.pressure_center_x_rmse << "  mean_ms=" << summary.mean_eval_ms
                   << "\n";
     }
